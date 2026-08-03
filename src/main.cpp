@@ -84,9 +84,12 @@ float ax, ay, az, gx, gy, gz, mx, my, mz; // leituras IMU/mag (rad/s, g, uT)
 bool mag_ok = false;
 
 // ===== Barometro BMP280 (somente leitura — nao realimenta o controle) =====
-// O sensor converte a ~125 Hz; ler decimado evita gastar I2C no loop de 192 Hz.
-// Cada leitura vira uma amostra ">alt:" no Teleplot (~24 Hz, ~290 B/s).
-const int BARO_DECIMATION_CYCLES = 8;  // ~24 Hz
+// O sensor converte a 26,3 Hz (ODR do preset "Indoor navigation"); ler decimado
+// evita gastar I2C no loop de 192 Hz. A decimacao tem que ficar abaixo do ODR
+// MINIMO de 23,1 Hz (Tabela 13 do datasheet, 43,2 ms de conversao no pior caso),
+// senao parte das leituras repete a amostra anterior.
+// Cada leitura vira uma amostra ">alt:" no Teleplot (~19 Hz, ~230 B/s).
+const int BARO_DECIMATION_CYCLES = 10;  // ~19,2 Hz
 bool  baro_ok           = false;
 float baro_p0_pa        = 0.0f; // pressao de referencia (altura zero), fixada no setup
 float baro_pressure_pa  = 0.0f;
@@ -391,9 +394,15 @@ void setup() {
     baro_ok = start_BMP280(Wire);
     if (baro_ok) {
         // Referencia de altura zero: media com o drone parado no chao.
-        baro_p0_pa = bmp280_reference_pressure(1000);
-        Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
-                      baro_p0_pa, baro_p0_pa / 100.0f);
+        // Bloqueia ~5,3 s (3 s de assentamento do IIR x16 + 50 * 45 ms).
+        baro_p0_pa = bmp280_reference_pressure(50);
+        if (baro_p0_pa > 0.0f) {
+            Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
+                          baro_p0_pa, baro_p0_pa / 100.0f);
+        } else {
+            baro_ok = false;
+            Serial.println("⚠️  BMP280 parou de responder na referência - sem leitura de altura.");
+        }
     } else {
         Serial.println("⚠️  BMP280 indisponível - sem leitura de altura.");
     }
@@ -533,7 +542,8 @@ void loop(){
         if (++baro_cycle >= BARO_DECIMATION_CYCLES) {
             baro_cycle = 0;
             read_BMP280(baro_pressure_pa, baro_temperature_c);
-            baro_altitude_m = bmp280_altitude(baro_pressure_pa, baro_p0_pa);
+            baro_altitude_m = bmp280_altitude(baro_pressure_pa, baro_p0_pa,
+                                              baro_temperature_c);
 
             // Formato Teleplot (">serie:valor"), o mesmo do stream de atitude no
             // fim do loop — as duas saidas convivem no mesmo grafico.
