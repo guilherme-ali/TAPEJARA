@@ -421,11 +421,26 @@ IRAM_ATTR static bool invert_4x4_cofactor(const float* __restrict__ m, float* __
 }
 
 // Gauss-Jordan otimizado para tamanhos genéricos
+/// Ordem maxima resolvida no buffer da pilha. n=6 (SDA da DARE 6x6) cabe folgado:
+/// 6*12 floats = 288 B. Acima disso cai no heap, como antes.
+static const int GJ_STACK_MAX_N = 8;
+
 IRAM_ATTR static bool invert_gauss_jordan(const float* matrix, float* result, int n) {
     const int n2 = n * 2;
-    float* aug = new(std::nothrow) float[n * n2];
-    if (!aug) return false;
-    
+
+    // O SDA chama isto uma vez por iteracao; um new/delete por chamada custava
+    // tempo e fragmentava o heap no caminho quente. Para n <= 8 fica na pilha.
+    float stackAug[GJ_STACK_MAX_N * GJ_STACK_MAX_N * 2];
+    float* heapAug = nullptr;
+    float* aug;
+    if (n <= GJ_STACK_MAX_N) {
+        aug = stackAug;
+    } else {
+        heapAug = new(std::nothrow) float[n * n2];
+        if (!heapAug) return false;
+        aug = heapAug;
+    }
+
     // Inicializar [A|I]
     memset(aug, 0, n * n2 * sizeof(float));
     for (int i = 0; i < n; i++) {
@@ -447,7 +462,7 @@ IRAM_ATTR static bool invert_gauss_jordan(const float* matrix, float* result, in
         }
         
         if (max_val < 1e-10f) {
-            delete[] aug;
+            delete[] heapAug;
             return false;
         }
         
@@ -488,13 +503,25 @@ IRAM_ATTR static bool invert_gauss_jordan(const float* matrix, float* result, in
         memcpy(&result[i * n], &aug[i * n2 + n], n * sizeof(float));
     }
     
-    delete[] aug;
+    delete[] heapAug;
     return true;
 }
 
-bool MatrixOperations::invertMatrix(const float* matrix, float* result, int n)
+// IRAM: o SDA chama isto uma vez por iteracao. Os demais kernels de matriz ja
+// estavam em IRAM; so este cruzava a fronteira para a flash a cada passo.
+IRAM_ATTR bool MatrixOperations::invertMatrix(const float* matrix, float* result, int n)
 {
     if (!matrix || !result) return false;
+
+    // Os kernels invert_* marcam entrada e saida como __restrict__, mas o SDA
+    // inverte in-place (invertMatrix(X, X, n)). Sob -Os isso passava batido; com
+    // -O3 o compilador pode assumir que nao ha alias e reordenar os stores.
+    // Copiamos para a pilha quando os ponteiros coincidem.
+    if (matrix == result && n <= GJ_STACK_MAX_N) {
+        float tmp[GJ_STACK_MAX_N * GJ_STACK_MAX_N];
+        memcpy(tmp, matrix, n * n * sizeof(float));
+        return MatrixOperations::invertMatrix(tmp, result, n);
+    }
 
     switch (n) {
         case 1:

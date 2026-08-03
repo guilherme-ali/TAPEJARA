@@ -19,7 +19,7 @@
 
 // ===== Flags de configuracao =====
 const bool DEBUG_MODE       = false; // true: prints detalhados; false: Serial Plotter
-const bool PRINT_TELEMETRY  = true; // true: stream continuo de roll,pitch,yaw,p,q,r
+const bool PRINT_TELEMETRY  = false; // true: stream continuo de roll,pitch,yaw,p,q,r
 // A TPJ-01 traz um QMC5883P (0x2C), nao o QMC5883L (0x0D) da placa antiga —
 // driver proprio em lib/utils/qmc5883p.*. Antes de ligar isto em voo, RECALIBRE:
 // os offsets abaixo sao do chip antigo e nao valem para este.
@@ -52,7 +52,7 @@ const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
 const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
 const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
-const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0052f;
+const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.002f : 0.002f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
 // Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
 // fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
@@ -830,6 +830,11 @@ void loop(){
                 Serial.println("\n⚙️  SDRE TASK (fora do loop de 5ms):");
                 Serial.printf("   updateSystemMatrix: %4lu μs\n", sdre_t_updateMatrix);
                 Serial.printf("   computeGains (DARE): %4lu μs\n", sdre_t_computeGains);
+                // Iteracoes/residuo do SDA: se iter bater no teto (30) o solver esta
+                // estagnando e o tempo esta sendo gasto a toa — ver criterio de parada.
+                Serial.printf("   SDA: %d iteracoes, residuo %.2e\n",
+                              sdreController.getLastIterations(),
+                              sdreController.getLastResidual());
                 Serial.printf("   Total SDRE:          %4lu μs  (rodando a ~20 Hz em task separada)\n", sdre_t_total);
             }
             

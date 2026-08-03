@@ -44,7 +44,7 @@ public:
      * @brief Compute optimal feedback gains
      * @return true if successful, false if computation fails
      */
-    bool computeGains(const char* method = "SDA_FIXED");
+    bool computeGains(const char* method = "SDA");
 
     /**
      * @brief Update the controller with current state
@@ -161,6 +161,11 @@ private:
     float lastResidual; ///< Final residual norm from last computation
     float residualHistory[10]; ///< Residuals for first 10 iterations
     int residualHistoryCount; ///< Number of valid entries in residualHistory
+
+    /// Scratch do SDA, alocado uma unica vez no construtor. O SDA roda a cada
+    /// ciclo do SDRE (~200 Hz); fazer 13 new/delete por chamada custava tempo e
+    /// fragmentava o heap. Layout: 9 blocos n*n + 1 de m*m + 3 de m*n.
+    float* sdaScratch;
 
     /**
      * @brief Compute the optimal gain matrix by solving DARE (iterative method)

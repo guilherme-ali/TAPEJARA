@@ -5,6 +5,21 @@
 #include <algorithm> // Para std::sort
 #include <stdint.h>
 
+// Tamanho do scratch do SDA: 11 blocos n*n (Ak,Gk,Hk,*_next,AT,W,Temp1..3),
+// 3 blocos m*m (R_inv,BT_P_B,R_plus_BTPB) e 4 blocos m*n (BT,B_Rinv,BT_P,BT_P_A).
+// n=6,m=3 -> 495 floats (1980 B).
+static constexpr int SDA_SCRATCH_FLOATS(int n, int m) {
+    return 11 * n * n + 3 * m * m + 4 * m * n;
+}
+
+// Teto de iteracoes do SDA. Caracterizado no host sobre 6 pontos do envelope
+// (hover, roll/pitch ate 50 graus, taxas 350 deg/s, acoplamento giroscopico):
+// converge em 10-11 iteracoes com residuo relativo da DARE ~4e-8. 40 da folga
+// de ~3,6x e serve so como rede de seguranca; era 100.
+#ifndef SDA_MAX_ITERATIONS
+#define SDA_MAX_ITERATIONS 40
+#endif
+
 // ============================================================================
 // SDA em fixed-point Q13.18 (int32) — caminho rápido para ESP32-S2 sem FPU.
 // Validado end-to-end: erro do K < 1% vs float, ~2.7× mais rápido, erro é
@@ -168,6 +183,7 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
     , lastIterations(-1)
     , lastResidual(-1.0f)
     , residualHistoryCount(0)
+    , sdaScratch(nullptr)
 {
     // Inicializar histórico de resíduos
     for (int i = 0; i < 10; i++) {
@@ -184,6 +200,7 @@ AutoLQR::AutoLQR(int stateSize, int controlSize)
         P = new float[stateSize * stateSize]();
         Kr = new float[controlSize * controlSize]();
         reference = new float[controlSize]();
+        sdaScratch = new float[SDA_SCRATCH_FLOATS(stateSize, controlSize)]();
     }
 }
 
@@ -198,6 +215,7 @@ AutoLQR::~AutoLQR()
     delete[] P;
     delete[] Kr;
     delete[] reference;
+    delete[] sdaScratch;
 }
 
 bool AutoLQR::setStateMatrix(const float* inputA)
@@ -259,7 +277,7 @@ bool AutoLQR::computeGains(const char* method)
         Serial.print(F("Método desconhecido: "));
         Serial.print(method);
         Serial.println(F(". Usando SDA."));
-        K_flag = computeGainMatrixSDA_Fixed();
+        K_flag = computeGainMatrixSDA();
     }
     
     if (!K_flag)
@@ -354,64 +372,66 @@ bool AutoLQR::computeGainMatrixSDA_Fixed()
     return true;
 }
 
-bool AutoLQR::computeGainMatrixSDA()
+// MATRIX_FAST_ATTR = IRAM_ATTR no ESP32, vazio no host (ver MatrixOperations.h).
+// O loop do SDA rodava da flash via cache de instrucoes de 16 KB, competindo com
+// o resto do firmware; os kernels de matriz que ele chama ja estavam em IRAM.
+MATRIX_FAST_ATTR bool AutoLQR::computeGainMatrixSDA()
 {
     // Implementação do Structure-preserving Doubling Algorithm (SDA)
     // Para DARE: A'·P·A - P - A'·P·B·(R + B'·P·B)^(-1)·B'·P·A + Q = 0
-    
-    if (!A || !B || !Q || !R || !K || !P)
+
+    if (!A || !B || !Q || !R || !K || !P || !sdaScratch)
         return false;
 
     if (!isSystemControllable()) {
         return false;
     }
 
-    // Alocação de memória
-    float* Ak = new float[stateSize * stateSize]();
-    float* Gk = new float[stateSize * stateSize]();
-    float* Hk = new float[stateSize * stateSize]();
-    
-    float* Ak_next = new float[stateSize * stateSize]();
-    float* Gk_next = new float[stateSize * stateSize]();
-    float* Hk_next = new float[stateSize * stateSize]();
-    
-    float* R_inv = new float[controlSize * controlSize]();
-    float* BT = new float[controlSize * stateSize]();
-    float* AT = new float[stateSize * stateSize]();
-    float* W = new float[stateSize * stateSize]();
-    float* Temp1 = new float[stateSize * stateSize]();
-    float* Temp2 = new float[stateSize * stateSize]();
-    float* Temp3 = new float[stateSize * stateSize]();
-    
+    // Scratch pré-alocado no construtor (ver SDA_SCRATCH_FLOATS). Nenhuma
+    // alocação dinâmica no caminho quente.
+    const int nn = stateSize * stateSize;
+    const int mm = controlSize * controlSize;
+    const int mn = controlSize * stateSize;
+
+    float* p = sdaScratch;
+    float* Ak      = p; p += nn;
+    float* Gk      = p; p += nn;
+    float* Hk      = p; p += nn;
+    float* Ak_next = p; p += nn;
+    float* Gk_next = p; p += nn;
+    float* Hk_next = p; p += nn;
+    float* AT      = p; p += nn;
+    float* W       = p; p += nn;
+    float* Temp1   = p; p += nn;
+    float* Temp2   = p; p += nn;
+    float* Temp3   = p; p += nn;
+    float* R_inv   = p; p += mm;
+    float* BT      = p; p += mn;
+    float* B_Rinv  = p; p += mn;
+
     // ========================================================================
     // INICIALIZAÇÃO CORRETA DO SDA PARA DARE
     // ========================================================================
-    
+
     // 1. Ak = A (correto)
-    matrixCopy(A, Ak, stateSize * stateSize);
-    
+    matrixCopy(A, Ak, nn);
+
     // 2. Calcular transpostas
     transposeMatrix(A, AT, stateSize, stateSize);
     transposeMatrix(B, BT, stateSize, controlSize);
-    
+
     // 3. Calcular R_inv
-    matrixCopy(R, R_inv, controlSize * controlSize);
+    matrixCopy(R, R_inv, mm);
     if (!invertMatrix(R_inv, R_inv, controlSize)) {
-        delete[] Ak; delete[] Gk; delete[] Hk;
-        delete[] Ak_next; delete[] Gk_next; delete[] Hk_next;
-        delete[] R_inv; delete[] BT; delete[] AT;
-        delete[] W; delete[] Temp1; delete[] Temp2; delete[] Temp3;
         return false;
     }
-    
+
     // 4. Gk = B * R^(-1) * B' (correto)
-    float* B_Rinv = new float[stateSize * controlSize];
     matrixMultiply(B, R_inv, B_Rinv, stateSize, controlSize, controlSize);
     matrixMultiply(B_Rinv, BT, Gk, stateSize, controlSize, stateSize);
-    delete[] B_Rinv;
 
     // 5. CORREÇÃO CRÍTICA: Hk = Q (não A'·Q·A + Q)
-    matrixCopy(Q, Hk, stateSize * stateSize);
+    matrixCopy(Q, Hk, nn);
 
     // ========================================================================
     // ESCALONAMENTO INICIAL (removido para DARE pois altera a solução)
@@ -423,15 +443,27 @@ bool AutoLQR::computeGainMatrixSDA()
     // ========================================================================
     // LOOP SDA
     // ========================================================================
-    const int maxIterations = 100;
+    // Cada iteracao do SDA dobra o horizonte coberto (A_k -> A_k(I+G_kH_k)^-1 A_k).
+    // Com dt = 5,2 ms sao ~10 iteracoes so para alcancar o regime permanente:
+    // nessa fase H_k ainda cresce e o residuo relativo fica perto de 1, e a queda
+    // quadratica so aparece no fim. Nao tente cortar cedo por "estagnacao".
+    const int maxIterations = SDA_MAX_ITERATIONS;
     const float tolerance = 1e-6f;
+    const float tolerance2 = tolerance * tolerance;
     bool converged = false;
-    
+
+    // Trabalhamos com normas AO QUADRADO no teste de parada: rel < tol  <=>
+    // diff2 < tol^2 * norm2. Evita 2 sqrtf por iteracao — a libgcc do
+    // xtensa-esp32s3 emula div e sqrt em software (a FPU do LX7 so tem
+    // add/sub/mul/madd), entao cada uma custa ~70 ciclos.
+    float last_rel2 = 0.0f;
+
     // Inicializar histórico de resíduos
     residualHistoryCount = 0;
     for (int i = 0; i < 10; i++) residualHistory[i] = 0.0f;
 
-    for (int iter = 0; iter < maxIterations; iter++) {
+    int iter = 0;
+    for (; iter < maxIterations; iter++) {
         // W = (I + Gk·Hk)^(-1)
         matrixMultiply(Gk, Hk, Temp1, stateSize, stateSize, stateSize);
 
@@ -439,7 +471,7 @@ bool AutoLQR::computeGainMatrixSDA()
             Temp1[i * stateSize + i] += 1.0f;
         }
 
-        matrixCopy(Temp1, W, stateSize * stateSize);
+        matrixCopy(Temp1, W, nn);
         if (!invertMatrix(W, W, stateSize)) {
             break;
         }
@@ -462,92 +494,72 @@ bool AutoLQR::computeGainMatrixSDA()
         matrixMultiplySymOutput(AT, Temp3, Temp2, stateSize);
         matrixAdd(Hk, Temp2, Hk_next, stateSize, stateSize);
 
-        // Verificar convergência usando norma Frobenius relativa
-        float diff = 0.0f;
-        float norm_Hk = 0.0f;
-        for (int i = 0; i < stateSize * stateSize; i++) {
-            float d = Hk_next[i] - Hk[i];
-            diff += d * d;
-            norm_Hk += Hk[i] * Hk[i];
+        // Convergência: norma de Frobenius relativa, ao quadrado (sem sqrt)
+        float diff2 = 0.0f;
+        float norm2 = 0.0f;
+        for (int i = 0; i < nn; i++) {
+            const float d = Hk_next[i] - Hk[i];
+            diff2 += d * d;
+            norm2 += Hk[i] * Hk[i];
         }
-        diff = sqrtf(diff);
-        norm_Hk = sqrtf(norm_Hk);
 
-        // Resíduo relativo (como nos outros métodos)
-        float rel_diff = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
+        // rel^2 = diff2 / norm2 (1 divisao por iteracao, contra 2 sqrt + 1 div antes)
+        const float rel2 = (norm2 > 1e-20f) ? (diff2 / norm2) : diff2;
+        last_rel2 = rel2;
 
-        // Armazenar resíduo no histórico (primeiras 10 iterações)
+        // Armazenar resíduo no histórico (primeiras 10 iterações).
+        // Aqui o sqrtf vale a pena: o historico e' diagnostico e so roda 10x.
         if (iter < 10) {
-            residualHistory[iter] = rel_diff;
+            residualHistory[iter] = sqrtf(rel2);
             residualHistoryCount = iter + 1;
         }
 
         // Atualizar
-        matrixCopy(Ak_next, Ak, stateSize * stateSize);
-        matrixCopy(Gk_next, Gk, stateSize * stateSize);
-        matrixCopy(Hk_next, Hk, stateSize * stateSize);
+        matrixCopy(Ak_next, Ak, nn);
+        matrixCopy(Gk_next, Gk, nn);
+        matrixCopy(Hk_next, Hk, nn);
 
-        if (rel_diff < tolerance) {
+        if (rel2 < tolerance2) {
             converged = true;
-            lastIterations = iter + 1;
-            lastResidual = rel_diff;
             break;
         }
     }
 
-    if (!converged) {
-        lastIterations = maxIterations;
-        float diff = 0.0f;
-        float norm_Hk = 0.0f;
-        for (int i = 0; i < stateSize * stateSize; i++) {
-            float d = Hk_next[i] - Hk[i];
-            diff += d * d;
-            norm_Hk += Hk[i] * Hk[i];
-        }
-        diff = sqrtf(diff);
-        norm_Hk = sqrtf(norm_Hk);
-        lastResidual = (norm_Hk > 1e-10f) ? (diff / norm_Hk) : diff;
-    }
+    lastIterations = (iter < maxIterations) ? (iter + 1) : maxIterations;
+    lastResidual   = sqrtf(last_rel2);
 
     // P = Hk (solução final)
-    matrixCopy(Hk, P, stateSize * stateSize);
+    matrixCopy(Hk, P, nn);
 
     // ========================================================================
     // CÁLCULO DO GANHO K
     // ========================================================================
     // K = (R + B'·P·B)^(-1) · B'·P·A
-    
-    float* BT_P = new float[controlSize * stateSize];
-    float* BT_P_B = new float[controlSize * controlSize];
-    float* BT_P_A = new float[controlSize * stateSize];
-    float* R_plus_BTPB = new float[controlSize * controlSize];
+
+    float* BT_P        = p; p += mn;
+    float* BT_P_B      = p; p += mm;
+    float* BT_P_A      = p; p += mn;
+    float* R_plus_BTPB = p;
 
     // BT_P = B'·P
     matrixMultiply(BT, P, BT_P, controlSize, stateSize, stateSize);
-    
+
     // BT_P_B = (B'·P)·B
     matrixMultiply(BT_P, B, BT_P_B, controlSize, stateSize, controlSize);
-    
+
     // R_plus_BTPB = R + B'·P·B
     matrixAdd(R, BT_P_B, R_plus_BTPB, controlSize, controlSize);
-    
+
     // Inverter
     if (!invertMatrix(R_plus_BTPB, R_plus_BTPB, controlSize)) {
         converged = false;
     } else {
         // BT_P_A = (B'·P)·A
         matrixMultiply(BT_P, A, BT_P_A, controlSize, stateSize, stateSize);
-        
+
         // K = (R + B'·P·B)^(-1) · (B'·P·A)
         matrixMultiply(R_plus_BTPB, BT_P_A, K, controlSize, controlSize, stateSize);
     }
-
-    // Limpeza
-    delete[] Ak; delete[] Gk; delete[] Hk;
-    delete[] Ak_next; delete[] Gk_next; delete[] Hk_next;
-    delete[] R_inv; delete[] BT; delete[] AT;
-    delete[] W; delete[] Temp1; delete[] Temp2; delete[] Temp3;
-    delete[] BT_P; delete[] BT_P_B; delete[] BT_P_A; delete[] R_plus_BTPB;
 
     return converged;
 }
