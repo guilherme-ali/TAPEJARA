@@ -174,6 +174,16 @@ float bmp280_altitude(float pressure_pa, float p0_pa) {
 float bmp280_reference_pressure(int n_samples) {
     if (n_samples < 1) n_samples = 1;
 
+    int count = 0;
+
+    // Espera ate o sensor estabilizar e responder com pressao valida.
+    while (count < 1000) {
+        float p, t;
+        read_BMP280(p, t);
+        if (p > 0.0f) count++;
+        delay(10); // > tempo de conversao, garante amostras independentes
+    }
+
     float sum = 0.0f;
     float p, t;
     for (int i = 0; i < n_samples; i++) {
