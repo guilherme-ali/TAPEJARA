@@ -206,16 +206,12 @@ float gyro_offset_y = 0.013235f;
 float gyro_offset_z = -0.002012f;
 
 // ===== Calibracao QMC5883P (obter via test/calibrate_magnetometer.cpp) =====
-// ZERADOS DE PROPOSITO. Os valores anteriores (26.5 / 221.5 / -72.5 e escalas
-// 1.0243 / 0.9575 / 1.0210) vieram do QMC5883L da placa antiga: outro chip, outra
-// sensibilidade (3000 vs 3750 LSB/G) e outra orientacao fisica na PCB — aplica-los
-// aqui injetaria um erro de heading grande. Rode a calibracao e substitua.
-const float MAG_OFFSET_X = -372.5f;
-const float MAG_OFFSET_Y = -231.0f;
-const float MAG_OFFSET_Z = -108.0f;
-const float MAG_SCALE_X = 0.9877f;
-const float MAG_SCALE_Y = 1.0520f;
-const float MAG_SCALE_Z = 0.9644f;
+const float MAG_OFFSET_X = -405.0f;
+const float MAG_OFFSET_Y = -169.5f;
+const float MAG_OFFSET_Z = -102.5f;
+const float MAG_SCALE_X = 1.0404f;
+const float MAG_SCALE_Y = 0.9786f;
+const float MAG_SCALE_Z = 0.9833f;
 
 MotorControl motors;
 LEDControl   leds;
@@ -395,7 +391,7 @@ void setup() {
     baro_ok = start_BMP280(Wire);
     if (baro_ok) {
         // Referencia de altura zero: media com o drone parado no chao.
-        baro_p0_pa = bmp280_reference_pressure(30);
+        baro_p0_pa = bmp280_reference_pressure(1000);
         Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
                       baro_p0_pa, baro_p0_pa / 100.0f);
     } else {
