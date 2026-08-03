@@ -2,26 +2,36 @@
 
 ## 📋 Tabela de Status dos LEDs
 
-| Status | LED | Ação | Descrição |
-|--------|-----|------|-----------|
-| **POWER_ON** | ⚪ WHITE | Fully lit | Sempre aceso (hardware) - não controlável |
-| **SENSORS_CALIBRATION** | 🔵 BLUE | Blinking slowly | Calibrando sensores (inicialização) |
-| **SYSTEM_READY** | 🔵 BLUE | Blinking | Sistema pronto e aguardando/conectado |
-| **UDP_RX** | 🟢 GREEN | Blinking | Recebendo pacotes UDP do controle |
-| **LOW_POWER** | 🔴 RED | Fully lit | Bateria baixa ou crítica |
+A placa **Tapejara TPJ-01** tem 4 LEDs, um por braço: **2 verdes** (M2, M3) e **2 vermelhos**
+(M1, M4). Não há LED azul como na placa anterior, então `LEDControl` agrupa os LEDs em dois
+canais lógicos e resolve o canal de status por prioridade.
+
+| Status | LEDs | Ação | Descrição |
+|--------|------|------|-----------|
+| **SENSORS_CALIBRATION** | 🟢 VERDES | Blinking slowly (1 s) | Calibrando sensores (inicialização) |
+| **SYSTEM_READY** | 🟢 VERDES | Blinking (500 ms) | Sistema pronto, aguardando conexão |
+| **UDP_RX** | 🟢 VERDES | Fully lit | App conectado, recebendo pacotes UDP |
+| **LOW_POWER** | 🔴 VERMELHOS | Fully lit | Bateria baixa ou crítica |
+
+Prioridade do canal de status: `UDP_RX` > `SYSTEM_READY` > `SENSORS_CALIBRATION`.
 
 ## 🔌 Mapeamento de Pinos
 
-Conforme a tabela "Definition of Main Board IO":
+Fonte de verdade: [`include/board_config.h`](../include/board_config.h). Esquemático:
+`tapejaraBoard_v1.pdf`, bloco *Sinalization*.
 
 ```cpp
-GPIO7  -> LED_BLUE    (Status do sistema)
-GPIO8  -> LED_RED     (Bateria baixa)
-GPIO9  -> LED_GREEN   (Recepção UDP)
-GPIO2  -> ADC_7_BAT   (Leitura de bateria - VBAT/2)
+IO6   -> LED1 (vermelho, braço M1)  ─┐ canal ALERTA
+IO5   -> LED4 (vermelho, braço M4)  ─┘
+IO41  -> LED2 (verde, braço M2)     ─┐ canal STATUS
+IO43  -> LED3 (verde, braço M3)     ─┘
 
-LED_WHITE -> Sempre aceso (não controlável por software)
+IO1   -> ADC de bateria (divisor R22/R23 = 100k/100k, VBAT/2)
 ```
+
+> **IO43 era o U0TXD.** Por isso o build define `-DARDUINO_USB_CDC_ON_BOOT=1`: o `Serial`
+> precisa sair pelo USB nativo (IO19/20), e não pelo UART0. Durante o reset o ROM bootloader
+> ainda escreve seu log nesse pino, então o LED3 pisca por um instante no boot — é normal.
 
 ## 🔋 Sistema de Monitoramento de Bateria
 
@@ -36,7 +46,7 @@ LED_WHITE -> Sempre aceso (não controlável por software)
 
 ### Leitura de Tensão
 
-O pino GPIO2 (ADC_7_BAT) lê a tensão da bateria através de um divisor de tensão (VBAT/2).
+O pino IO1 (ADC1_CH0) lê a tensão da bateria através do divisor R22/R23 = 100k/100k (VBAT/2).
 
 **Cálculo:**
 ```
@@ -165,7 +175,7 @@ void testLEDs() {
 ### Leitura de bateria incorreta
 - Verifique divisor de tensão (deve ser VBAT/2)
 - Calibre ADC se necessário
-- Confirme GPIO2 está conectado corretamente
+- Confirme que IO1 está conectado corretamente
 
 ### LEDs piscam erraticamente
 - Verifique fonte de alimentação

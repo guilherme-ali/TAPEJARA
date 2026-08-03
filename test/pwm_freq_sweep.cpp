@@ -35,15 +35,16 @@
 #include <Wire.h>
 #include <math.h>
 
-// ---- Pinos (devem casar com lib/MotorControl/MotorControl.h) ----
-#define MOTOR_1_PIN 5
-#define MOTOR_2_PIN 4
-#define MOTOR_3_PIN 3
-#define MOTOR_4_PIN 6
+// ---- Pinos: unica fonte de verdade em include/board_config.h ----
+#include "board_config.h"
 
-// ---- I2C (devem casar com lib/utils/sensor_config.h) ----
-#define I2C_SDA 11
-#define I2C_SCL 10
+#define MOTOR_1_PIN PIN_MOTOR_1
+#define MOTOR_2_PIN PIN_MOTOR_2
+#define MOTOR_3_PIN PIN_MOTOR_3
+#define MOTOR_4_PIN PIN_MOTOR_4
+
+#define I2C_SDA PIN_I2C_SDA
+#define I2C_SCL PIN_I2C_SCL
 
 // ---- Parametros do teste ----
 static const uint32_t FREQS_HZ[] = {

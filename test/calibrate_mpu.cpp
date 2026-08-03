@@ -11,9 +11,10 @@
 #include <Adafruit_Sensor.h>
 #include <Wire.h>
 
-// Definições dos pinos I2C (ajuste se necessário)
-#define I2C_SDA 11
-#define I2C_SCL 10
+// Pinos I2C: única fonte de verdade em include/board_config.h
+#include "board_config.h"
+#define I2C_SDA PIN_I2C_SDA
+#define I2C_SCL PIN_I2C_SCL
 
 Adafruit_MPU6050 mpu;
 
@@ -32,8 +33,8 @@ void setup() {
     Serial.println("╚════════════════════════════════════════════════════════╝");
     Serial.println();
     
-    // Inicializa I2C usando as definições de sensor_config.h
-    Wire.begin(I2C_SDA, I2C_SCL);  // Usa os pinos definidos em sensor_config.h
+    // Inicializa I2C usando as definições de board_config.h
+    Wire.begin(I2C_SDA, I2C_SCL);
     Wire.setClock(400000); // 400kHz para comunicação rápida
     
     Serial.printf("Configuração I2C:\n");

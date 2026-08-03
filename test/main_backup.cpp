@@ -1,5 +1,8 @@
 /**
- * Controle de atitude de quadricoptero em ESP32-S2 com SDRE-LQR (ou PID).
+ * Controle de atitude de quadricoptero na placa Tapejara TPJ-01 v1.0
+ * (ESP32-S3-WROOM-1-N16R8) com SDRE-LQR (ou PID).
+ *
+ * Pinagem em include/board_config.h — inclusive a lista de GPIOs proibidos.
  *
  * Loop principal a 200 Hz (5 ms): IMU + Madgwick + alocacao X-quad.
  * Task paralela (FreeRTOS) recalcula ganhos via DARE — desacopla a Riccati do ciclo.
@@ -16,8 +19,11 @@
 
 // ===== Flags de configuracao =====
 const bool DEBUG_MODE       = false; // true: prints detalhados; false: Serial Plotter
-const bool PRINT_TELEMETRY  = false; // true: stream continuo de roll,pitch,yaw,p,q,r
-const bool USE_MAGNETOMETER = false; // true: 9-DOF (QMC5883L); false: 6-DOF (accel+gyro)
+const bool PRINT_TELEMETRY  = true; // true: stream continuo de roll,pitch,yaw,p,q,r
+// A TPJ-01 traz um QMC5883P (0x2C), nao o QMC5883L (0x0D) da placa antiga —
+// driver proprio em lib/utils/qmc5883p.*. Antes de ligar isto em voo, RECALIBRE:
+// os offsets abaixo sao do chip antigo e nao valem para este.
+const bool USE_MAGNETOMETER = true; // true: 9-DOF (magnetometro); false: 6-DOF (accel+gyro)
 const int  CONTROLLER_TYPE  = 0;     // 0 = SDRE, 1 = PID
 const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: sincrono no loop
 // =================================
@@ -25,7 +31,10 @@ const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: 
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 
+#include "board_config.h" // Pinagem da placa TPJ-01 (unica fonte de verdade)
 #include "utils.h"
+#include "bmp280.h"       // Barometro (somente leitura)
+#include "qmc5883p.h"     // Magnetometro (chip da TPJ-01, nao o QMC5883L antigo)
 #include "MotorControl.h" // Incluir controle de motores
 #include "WiFiComm.h" // Comunicação WiFi/UDP
 #include "led_control.h" // Controle de LEDs e bateria
@@ -38,13 +47,18 @@ const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: 
 void updateSystemMatrix(float roll, float pitch, float yaw, float p, float q, float r, float omega_r);
 
 // ===== Parametros fisicos do drone (medidos) =====
-const float Ixx   = 16.57e-6f;  // kg·m^2 — inercia roll
-const float Iyy   = 16.57e-6f;  // kg·m^2 — inercia pitch
-const float Izz   = 29.80e-6f;  // kg·m^2 — inercia yaw
+const float Ixx   = 42.95e-6f;  // kg·m^2 — inercia roll
+const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
+const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
 const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
-const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0051f;
+const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0052f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
+// Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
+// fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
+// N=5 -> dt~25ms (fs~40Hz, margem 5x sobre o fc=8Hz usado na identificacao) ->
+// ~25s de voo em vez de ~5s a cada ciclo.
+const int TELEMETRY_DECIMATION_CYCLES = 5;
 
 // ===== Coeficientes motor + helice (medidos via test/motor_calibration_test.cpp) =====
 
@@ -53,7 +67,7 @@ const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S
 //const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
 
 // helice 55mm (em uso)
-const float MOTOR_B_COEFF = 2.94e-8f;                      // N/(rad/s)^2 — empuxo medido
+const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
 const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
 
 const float MOTOR_D_COEFF = 0.05f * MOTOR_B_COEFF;         // N·m/(rad/s)^2 — drag (estimado)
@@ -63,6 +77,21 @@ const float MAX_THRUST    = MOTOR_B_COEFF * MAX_OMEGA * MAX_OMEGA; // N
 float omega_r = 0; // soma signed das velocidades de rotor (acoplamento giroscopico)
 
 float ax, ay, az, gx, gy, gz, mx, my, mz; // leituras IMU/mag (rad/s, g, uT)
+
+// true so' quando USE_MAGNETOMETER esta ligado E o QMC5883P respondeu na init.
+// O AHRS testa esta flag (nao USE_MAGNETOMETER) para nao alimentar o Madgwick
+// com zeros caso o sensor falhe.
+bool mag_ok = false;
+
+// ===== Barometro BMP280 (somente leitura — nao realimenta o controle) =====
+// O sensor converte a ~125 Hz; ler decimado evita gastar I2C no loop de 192 Hz.
+// Cada leitura vira uma amostra ">alt:" no Teleplot (~24 Hz, ~290 B/s).
+const int BARO_DECIMATION_CYCLES = 8;  // ~24 Hz
+bool  baro_ok           = false;
+float baro_p0_pa        = 0.0f; // pressao de referencia (altura zero), fixada no setup
+float baro_pressure_pa  = 0.0f;
+float baro_temperature_c = 0.0f;
+float baro_altitude_m   = 0.0f; // altura RELATIVA a baro_p0_pa
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -129,9 +158,13 @@ float Q[STATE_SIZE * STATE_SIZE] = {
 };
 
 // Torques fisicos maximos (aproximados) — usados pela regra de Bryson em R:
-const float max_tau_roll  = MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA; // ~0.016 N·m
-const float max_tau_pitch = MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA;
-const float max_tau_yaw   = 2.0f * MOTOR_D_COEFF * MAX_OMEGA * MAX_OMEGA;  // ~0.018 N·m
+const float perc_tau_x_max = 0.5f;
+const float perc_tau_y_max = 0.5f;
+const float perc_tau_z_max = 0.5f;
+
+const float max_tau_roll  = (2.0f * MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA) * perc_tau_x_max;
+const float max_tau_pitch = (2.0f * MOTOR_B_COEFF * L_ARM * MAX_OMEGA * MAX_OMEGA) * perc_tau_y_max;
+const float max_tau_yaw   = (4.0f * MOTOR_D_COEFF * MAX_OMEGA * MAX_OMEGA) * perc_tau_z_max;
 
 // R_ii = 1 / (max_torque_i)^2
 const float R_11 = 1.0f / (max_tau_roll  * max_tau_roll);
@@ -165,20 +198,24 @@ const float perc_cutoff = 0.8f;
 const float SENSOR_CUTOFF_HZ = ((1.0f / SAMPLING_TIME_S)/2.0f) * perc_cutoff;
 
 // ===== Calibracao MPU6050 (obtida via test/calibrate_mpu.cpp) =====
-float accel_offset_x =  0.058127f;
-float accel_offset_y = -0.148659f;
-float accel_offset_z =  0.018737f;
-float gyro_offset_x  = -0.007760f;
-float gyro_offset_y  =  0.017851f;
-float gyro_offset_z  =  0.007761f;
+float accel_offset_x = 0.424080f;
+float accel_offset_y = 0.034542f;
+float accel_offset_z = 0.117821f;
+float gyro_offset_x = -0.052348f;
+float gyro_offset_y = 0.013235f;
+float gyro_offset_z = -0.002012f;
 
-// ===== Calibracao QMC5883L (obtida via test/calibrate_magnetometer.cpp) =====
-const float MAG_OFFSET_X =  26.5f;   // Hard-iron
-const float MAG_OFFSET_Y = 221.5f;
-const float MAG_OFFSET_Z = -72.5f;
-const float MAG_SCALE_X = 1.0243f;   // Soft-iron
-const float MAG_SCALE_Y = 0.9575f;
-const float MAG_SCALE_Z = 1.0210f;
+// ===== Calibracao QMC5883P (obter via test/calibrate_magnetometer.cpp) =====
+// ZERADOS DE PROPOSITO. Os valores anteriores (26.5 / 221.5 / -72.5 e escalas
+// 1.0243 / 0.9575 / 1.0210) vieram do QMC5883L da placa antiga: outro chip, outra
+// sensibilidade (3000 vs 3750 LSB/G) e outra orientacao fisica na PCB — aplica-los
+// aqui injetaria um erro de heading grande. Rode a calibracao e substitua.
+const float MAG_OFFSET_X = -372.5f;
+const float MAG_OFFSET_Y = -231.0f;
+const float MAG_OFFSET_Z = -108.0f;
+const float MAG_SCALE_X = 0.9877f;
+const float MAG_SCALE_Y = 1.0520f;
+const float MAG_SCALE_Z = 0.9644f;
 
 MotorControl motors;
 LEDControl   leds;
@@ -194,11 +231,12 @@ bool motors_armed_by_remote = false; // True apos primeiro comando recebido
 bool skip_timing_sample     = false; // Ignora 1 amostra de tempo durante armamento
 bool tilt_failsafe_latched  = false; // So libera com reset fisico do drone
 
-// Failsafe de tilt: 60° evita zona singular 1/cos(pitch) onde Ad explode.
-const float MAX_SAFE_TILT_DEG = 60.0f;
+// Failsafe de tilt: desarma antes da zona singular 1/cos(pitch) onde Ad explode.
+const float MAX_SAFE_TILT_DEG = 80.0f;
 const float MAX_SAFE_TILT_RAD = MAX_SAFE_TILT_DEG * DEG_TO_RAD;
 
 float initial_yaw = 0.0f; // travado no setup() para referencia relativa
+float yaw_setpoint = 0.0f; // heading acumulado: stick de yaw = taxa (rad/s), integrada a cada ciclo
 
 // ===== Callbacks WiFi =====
 
@@ -336,12 +374,32 @@ void setup() {
     start_IMU_MPU6050(mpu);
 
     if (USE_MAGNETOMETER) {
-        Serial.println("Inicializando QMC5883L (Magnetômetro)...");
-        start_QMC5883L(Wire);
-        setQMC5883LCalibration(MAG_OFFSET_X, MAG_OFFSET_Y, MAG_OFFSET_Z,
-                               MAG_SCALE_X, MAG_SCALE_Y, MAG_SCALE_Z);
+        Serial.println("Inicializando QMC5883P (Magnetômetro)...");
+        mag_ok = start_QMC5883P(Wire);
+        if (mag_ok) {
+            setQMC5883PCalibration(MAG_OFFSET_X, MAG_OFFSET_Y, MAG_OFFSET_Z,
+                                   MAG_SCALE_X, MAG_SCALE_Y, MAG_SCALE_Z);
+        } else {
+            // Sem magnetometro o AHRS cai para 6-DOF em vez de alimentar o
+            // Madgwick com zeros, que arruinaria a estimativa de atitude.
+            Serial.println("⚠️  Magnetômetro indisponível - AHRS seguirá em 6-DOF.");
+        }
     } else {
         Serial.println("⚠️  Magnetômetro DESABILITADO - usando apenas Accel+Gyro (6-DOF)");
+    }
+
+    // ===== Barometro (mesmo barramento I2C do MPU6050) =====
+    // Falha aqui nao trava o boot: o barometro nao entra na malha de controle de
+    // atitude, ao contrario do MPU6050.
+    Serial.println("Inicializando BMP280 (Barômetro)...");
+    baro_ok = start_BMP280(Wire);
+    if (baro_ok) {
+        // Referencia de altura zero: media com o drone parado no chao.
+        baro_p0_pa = bmp280_reference_pressure(30);
+        Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
+                      baro_p0_pa, baro_p0_pa / 100.0f);
+    } else {
+        Serial.println("⚠️  BMP280 indisponível - sem leitura de altura.");
     }
 
     leds.setSensorsCalibration(false);
@@ -387,14 +445,14 @@ void setup() {
         read_MPU6050(mpu, ax, ay, az, gx, gy, gz,
                      accel_offset_x, accel_offset_y, accel_offset_z,
                      gyro_offset_x, gyro_offset_y, gyro_offset_z);
-        if (USE_MAGNETOMETER) read_QMC5883L(mx, my, mz);
+        if (mag_ok) read_QMC5883P(mx, my, mz);
         delay(10);
     }
 
     // Convergencia do quaternion com gyro=0 (drone parado): 100k iteracoes
     // garantem que o Madgwick esteja em regime antes de travar initial_yaw.
     for (int i = 0; i < 100000; i++) {
-        if (USE_MAGNETOMETER) {
+        if (mag_ok) {
             filter.update(0.0f, 0.0f, 0.0f, ax, ay, az, mx, my, mz);
         } else {
             filter.updateIMU(0.0f, 0.0f, 0.0f, ax, ay, az);
@@ -472,10 +530,31 @@ void loop(){
     t_mpu = micros() - t_checkpoint;
     t_checkpoint = micros();
 
+    // ----- Barometro (decimado, so' leitura) -----
+    // Nao realimenta o controle: apenas atualiza a altura relativa e imprime.
+    if (baro_ok) {
+        static int baro_cycle = 0;
+        if (++baro_cycle >= BARO_DECIMATION_CYCLES) {
+            baro_cycle = 0;
+            read_BMP280(baro_pressure_pa, baro_temperature_c);
+            baro_altitude_m = bmp280_altitude(baro_pressure_pa, baro_p0_pa);
+
+            // Formato Teleplot (">serie:valor"), o mesmo do stream de atitude no
+            // fim do loop — as duas saidas convivem no mesmo grafico.
+            // availableForWrite: se o ring buffer do USB CDC estiver cheio (host
+            // parou de drenar), Serial.write bloquearia ate 100 ms e estouraria o
+            // periodo de 5,2 ms do loop. Preferimos perder a amostra.
+            if (PRINT_TELEMETRY && Serial.availableForWrite() >= 32) {
+                Serial.printf(">alt:%.2f\n", baro_altitude_m);
+            }
+        }
+        t_checkpoint = micros(); // baro fora do profiling de t_mag/t_filter
+    }
+
     // ----- Magnetometro (se habilitado) + Madgwick -----
     // Adafruit_MPU6050 retorna gyro em rad/s; Madgwick espera deg/s.
-    if (USE_MAGNETOMETER) {
-        read_QMC5883L(mx, my, mz);
+    if (mag_ok) {
+        read_QMC5883P(mx, my, mz);
         t_mag = micros() - t_checkpoint;
         t_checkpoint = micros();
         filter.update(gx * RAD_TO_DEG, gy * RAD_TO_DEG, gz * RAD_TO_DEG,
@@ -511,7 +590,7 @@ void loop(){
         leds.setSystemReady(false);
         leds.setUDPReceiving(false);
 
-        Serial.println("\n🚨 FAILSAFE: inclinacao acima de 60 graus detectada!");
+        Serial.printf("\n🚨 FAILSAFE: inclinacao acima de %.0f graus detectada!\n", MAX_SAFE_TILT_DEG);
         Serial.printf("   Roll: %.2f deg | Pitch: %.2f deg\n",
                       roll * RAD_TO_DEG, pitch * RAD_TO_DEG);
         Serial.println("   Motores desligados. Reinicie o drone para rearmar.");
@@ -549,7 +628,12 @@ void loop(){
     if (remote_control_enabled && wifiComm.isClientConnected()) {
         phi_desired   = remote_command.roll  * DEG_TO_RAD;
         theta_desired = remote_command.pitch * DEG_TO_RAD;
-        yaw_desired   = remote_command.yaw   * DEG_TO_RAD;
+        // yaw do stick e taxa (rad/s), nao angulo (convencao CRTP: roll/pitch=angulo, yaw=taxa).
+        // Integra para formar o heading: stick centralizado -> taxa=0 -> mantem o angulo atual.
+        yaw_setpoint += (remote_command.yaw * DEG_TO_RAD) * SAMPLING_TIME_S;
+        while (yaw_setpoint >  PI) yaw_setpoint -= 2.0f * PI;
+        while (yaw_setpoint < -PI) yaw_setpoint += 2.0f * PI;
+        yaw_desired = yaw_setpoint;
 
         // Desnormaliza yaw_desired ao redor do yaw atual (erro em [-π,π]). Sem isso,
         // SDRE faz x[2]-r[2] linear e o drone gira pela rota longa em setpoints grandes.
@@ -625,18 +709,22 @@ void loop(){
         t_lqr = sdre_t_updateMatrix + sdre_t_computeGains;  // telemetria
     }
 
-    // ----- Telemetria em RAM (somente quando armado) -----
+    // ----- Telemetria em RAM (somente quando armado, decimada por TELEMETRY_DECIMATION_CYCLES) -----
     // Custo: ~1 us — apenas escritas em RAM, sem printf nem I/O.
     if (motors.isArmed()) {
-        // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
-        // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
-        // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
-        telemetry.log(millis(),
-                      roll, pitch, yaw,
-                      -phi_desired, -theta_desired, -yaw_desired,
-                      p, q, r,
-                      u[0], u[1], u[2],
-                      w1_sq, w2_sq, w3_sq, w4_sq);
+        static uint32_t telemetry_cycle = 0;
+        if (telemetry_cycle % TELEMETRY_DECIMATION_CYCLES == 0) {
+            // Referencia EFETIVA que o drone segue: como Kr = -K[:,:3], a malha rastreia
+            // x_ang -> -phi_desired. Salvamos o negativo para o grafico casar com o angulo
+            // medido (roll/pitch/yaw). Apenas telemetria — nao afeta o controle.
+            telemetry.log(millis(),
+                          roll, pitch, yaw,
+                          -phi_desired, -theta_desired, -yaw_desired,
+                          p, q, r,
+                          u[0], u[1], u[2],
+                          w1_sq, w2_sq, w3_sq, w4_sq);
+        }
+        telemetry_cycle++;
     } else {
         // Desarmado: aceita comandos serial — 'D' dump CSV, 'R' reset buffer.
         if (Serial.available()) {
@@ -687,8 +775,8 @@ void loop(){
     float avgTime = (loopCount > 0) ? ((float)totalTime / loopCount) : 0.0f;
     
     if (PRINT_TELEMETRY) {
-        Serial.printf("Roll:%.2f,Pitch:%.2f,Yaw:%.2f,P:%.2f,Q:%.2f,R:%.2f\n", 
-                      roll * RAD_TO_DEG, pitch * RAD_TO_DEG, yaw * RAD_TO_DEG, 
+        Serial.printf(">roll:%.2f\n>pitch:%.2f\n>yaw:%.2f\n>p:%.2f\n>q:%.2f\n>r:%.2f\n",
+                      roll * RAD_TO_DEG, pitch * RAD_TO_DEG, yaw * RAD_TO_DEG,
                       p * RAD_TO_DEG, q * RAD_TO_DEG, r * RAD_TO_DEG);
     }
 
@@ -766,8 +854,8 @@ void loop(){
             displayStates(const_cast<float*>(z_measurement));
             
             // Dados do magnetômetro (se habilitado)
-            if (USE_MAGNETOMETER) {
-                Serial.println("\n🧭 MAGNETÔMETRO (QMC5883L):");
+            if (mag_ok) {
+                Serial.println("\n🧭 MAGNETÔMETRO (QMC5883P):");
                 Serial.printf("   Campo Magnético: X=%+.2f  Y=%+.2f  Z=%+.2f μT\n", mx, my, mz);
                 float heading = atan2(my, mx) * RAD_TO_DEG;
                 if (heading < 0) heading += 360.0f;

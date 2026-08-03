@@ -36,7 +36,7 @@ void setup() {
     while (!Serial) delay(10);
 
     // Inicializa sensores
-    start_IMU_MPU6050(mpu); // Isso já faz o Wire.begin(11, 10)
+    start_IMU_MPU6050(mpu); // Isso já faz o Wire.begin (pinos em board_config.h)
     
     // Inicializa magnetômetro (no mesmo barramento I2C)
     start_QMC5883L(Wire);

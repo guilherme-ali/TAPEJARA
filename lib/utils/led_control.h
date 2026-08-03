@@ -2,15 +2,20 @@
 #define LED_CONTROL_H
 
 #include <Arduino.h>
+#include "board_config.h"
 
-// ============= DEFINIÇÃO DOS PINOS DOS LEDS (conforme tabela) =============
-// LED_WHITE não é controlável por software (sempre ligado quando há energia)
-#define LED_BLUE_PIN    7     // GPIO7 - LED_BLUE (SENSORS_CALIBRATION / SYSTEM_READY)
-#define LED_GREEN_PIN   9     // GPIO9 - LED_GREEN (UDP_RX)
-#define LED_RED_PIN     8     // GPIO8 - LED_RED (LOW_POWER)
+// ============= LEDS DA TPJ-01 =============
+// A placa tem 4 LEDs, um por braço: 2 verdes (M2, M3) e 2 vermelhos (M1, M4).
+// Não há LED azul como na placa antiga, então os LEDs são agrupados em dois
+// canais lógicos que preservam a semântica dos setters públicos:
+//
+//   STATUS (verdes)   -> calibrando / sistema pronto / UDP conectado
+//   ALERTA (vermelhos)-> bateria baixa ou crítica
+//
+// Pinos em include/board_config.h.
 
 // ============= PINO ADC PARA LEITURA DE BATERIA =============
-#define BATTERY_PIN     2     // GPIO2 - ADC_7_BAT (VBAT/2)
+#define BATTERY_PIN     PIN_VBAT_ADC   // IO1 - divisor R22/R23 (VBAT/2)
 
 // ============= THRESHOLDS DE BATERIA (LiPo 1S - 3.7V Nominal) =============
 #define BATTERY_LOW_VOLTAGE   3.4f    // Tensão considerada baixa (~20% restante)
@@ -29,23 +34,30 @@ enum LEDState {
 
 class LEDControl {
 private:
-    // Estados atuais dos LEDs (LED branco não é controlável)
-    LEDState blue_state;
-    LEDState green_state;
-    LEDState red_state;
-    
+    // Condições de sinalização. O canal STATUS é derivado delas por prioridade
+    // (UDP conectado > sistema pronto > calibrando), já que os dois LEDs verdes
+    // precisam representar os três estados que antes tinham LEDs separados.
+    bool calibrating;
+    bool system_ready;
+    bool udp_receiving;
+
+    // Estados resolvidos de cada canal
+    LEDState status_state;  // LEDs verdes  (M2, M3)
+    LEDState alert_state;   // LEDs vermelhos (M1, M4)
+
     // Controle de blinking
     unsigned long last_blink_time;
     bool blink_state;
     unsigned long blink_interval;
-    
+
     // Bateria
     float battery_voltage;
     bool low_battery_detected;
     unsigned long last_battery_check;
-    
+
     // Métodos privados
     void updateLED(int pin, LEDState state);
+    void resolveStatusState();
     float readBatteryVoltage();
     
 public:

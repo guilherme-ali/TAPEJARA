@@ -1,6 +1,10 @@
-# SDRE_VECTORIZED
+# TAPEJARA
 
-Controle de atitude de quadricóptero em **ESP32-S2** com **SDRE-LQR** (State-Dependent Riccati Equation) recalculado em tempo real. O sistema resolve a DARE a cada ciclo via uma das implementações otimizadas disponíveis (SDA, ADDA, etc.), com PID como alternativa selecionável.
+> 📌 **Origem do Projeto:** Este repositório é derivado do projeto [SDRE_VECTORIZED](https://github.com/guilherme-ali/SDRE_VECTORIZED), baseado no [Release V1.0.0](https://github.com/guilherme-ali/SDRE_VECTORIZED/releases/tag/V1.0.0).
+
+Controle de atitude de quadricóptero na placa **Tapejara TPJ-01** (ESP32-S3) com **SDRE-LQR** (State-Dependent Riccati Equation) recalculado em tempo real. O sistema resolve a DARE a cada ciclo via uma das implementações otimizadas disponíveis (SDA, ADDA, etc.), com PID como alternativa selecionável.
+
+> Até 2026-07 o firmware rodava numa montagem sobre **ESP32-S2 Saola-1** com sensores em fio. Os benchmarks de solver marcados como "ESP32-S2" em `lib/AUTOLQR/` e `lib/KalmanFilter/` são dessa medição e ainda não foram refeitos no S3 — que, ao contrário do S2, **tem FPU**.
 
 ## Visão geral
 
@@ -17,20 +21,51 @@ Controle de atitude de quadricóptero em **ESP32-S2** com **SDRE-LQR** (State-De
 
 ## Hardware
 
-| Componente       | Modelo                        | Observação                       |
-|------------------|-------------------------------|----------------------------------|
-| Microcontrolador | ESP32-S2 Saola-1              | 240 MHz, single-core             |
-| IMU              | MPU6050                       | I2C (SDA=GPIO11, SCL=GPIO10)     |
-| Magnetômetro     | QMC5883L (opcional, 9-DOF)    | Mesmo barramento I2C             |
-| Motores          | 4× brushed, hélice 55 mm      | PWM 25 kHz, 10-bit               |
-| Bateria          | LiPo 1S 3.7 V                 | Monitorada por ADC (GPIO2)       |
-| LEDs status      | RGB + branco (always-on HW)   | GPIO 7/8/9                       |
+Placa **Tapejara TPJ-01 v1.0** (X-frame integrado, FR-4 1,2 mm). Esquemático em
+`tapejaraBoard_v1.pdf`. **Toda a pinagem — inclusive a lista de GPIOs proibidos — vive em
+[`include/board_config.h`](include/board_config.h)**; não redefina pinos em outro lugar.
+
+| Componente       | Modelo                        | Observação                              |
+|------------------|-------------------------------|-----------------------------------------|
+| Microcontrolador | ESP32-S3-WROOM-1-N16R8        | 240 MHz, dual-core, 16 MB flash, FPU    |
+| IMU              | MPU6050 `0x68`                | I2C SDA=IO39, SCL=IO40, 400 kHz         |
+| Barômetro        | BMP280 `0x76`                 | Mesmo barramento — **somente leitura**  |
+| Magnetômetro     | QMC5883**P** `0x2C`           | Mesmo barramento — ⚠️ **não** é `0x0D` (ver abaixo) |
+| Câmera           | conector OV2640 (24 vias)     | Não usada pelo firmware                 |
+| Motores          | 4× coreless 8520, hélice 55 mm| PWM 25 kHz, 10-bit — IO8/IO48/IO2/IO4   |
+| Bateria          | LiPo 1S 3.7 V, 500 mAh        | ADC em IO1 (divisor 100k/100k)          |
+| LEDs status      | 2 verdes + 2 vermelhos        | IO41/IO43 (status), IO6/IO5 (alerta)    |
+
+> ⚠️ **O esquemático erra o endereço do magnetômetro.** O bloco *Magnetometer / Compass* do
+> `tapejaraBoard_v1.pdf` anota `I2C Addr.: 0x0D`, que é o endereço do QMC5883**L** da placa
+> anterior. O chip montado é o QMC5883**P**, cujo endereço de fábrica é **`0x2C`** (datasheet QST
+> 13-52-19 rev A, seção 5.4). Falar com `0x0D` produz
+> `requestFrom(): i2cRead returned Error -1`. Os dois chips também têm mapas de registradores
+> diferentes (dados em `0x01`, não `0x00`; control 1 em `0x0A`, não `0x09`), por isso o 'P' tem
+> driver próprio em `lib/utils/qmc5883p.*` — o `start_QMC5883L` de `utils.cpp` é do chip antigo e
+> ficou como código morto. Em dúvida sobre quem está no barramento, rode `test/i2c_scan.cpp`.
+
+**Magnetômetro:** habilitado por `USE_MAGNETOMETER` em `src/main.cpp`. Se o sensor não responder
+na inicialização, o AHRS cai automaticamente para 6-DOF em vez de alimentar o Madgwick com zeros.
+**Recalibre antes de voar** com `test/calibrate_magnetometer.cpp`: os coeficientes hard/soft-iron
+do chip antigo não valem aqui (sensibilidade 3750 vs 3000 LSB/G e outra orientação na PCB), e por
+isso estão zerados no `main.cpp`.
+
+**Serial:** o USB-C vai direto ao chip (IO19/IO20), sem conversor USB-UART, e o U0TXD (IO43) é
+usado como LED. Por isso o build define `-DARDUINO_USB_CDC_ON_BOOT=1` — sem essa flag não há
+saída serial nenhuma.
+
+**Numeração dos motores** (frente = topo do PCB): M1=IO8 frente-esquerda CCW, M2=IO48
+frente-direita CW, M3=IO2 trás-direita CCW, M4=IO4 trás-esquerda CW. Antes do primeiro voo,
+valide com `test/motor_id_test.cpp` (hélices removidas).
 
 ## Estrutura do projeto
 
 ```
-SDRE_VECTORIZED/
-├── platformio.ini            # Configuração PlatformIO (ESP32-S2, lib_deps)
+TAPEJARA/
+├── platformio.ini            # Configuração PlatformIO (ESP32-S3, lib_deps)
+├── include/
+│   └── board_config.h        # Pinagem da TPJ-01 + GPIOs proibidos (fonte de verdade)
 ├── src/
 │   └── main.cpp              # Loop principal + SDRETask + montagem das matrizes
 ├── lib/
@@ -41,7 +76,7 @@ SDRE_VECTORIZED/
 │   ├── Telemetry/            # Buffer circular em RAM + persistência em LittleFS
 │   ├── MotorControl/         # PWM dos 4 ESCs + armar/desarmar + mapeamento ω² → throttle
 │   ├── WiFiComm/             # Servidor UDP CRTP (compatível com app ESP-Drone)
-│   └── utils/                # Drivers MPU6050/QMC5883L, LEDs/bateria, alocação X-quad
+│   └── utils/                # Drivers MPU6050/BMP280/QMC5883L, LEDs/bateria, alocação X-quad
 ├── python/
 │   ├── atitude_sim.py            # Simulação do controle de atitude
 │   ├── compara_solvers.py        # Comparação dos solvers DARE
@@ -70,13 +105,13 @@ Pré-requisitos: [PlatformIO](https://platformio.org/) (extensão VS Code recome
 
 ```bash
 pio run                    # compila
-pio run --target upload    # envia para o ESP32-S2
+pio run --target upload    # envia para o ESP32-S3 (USB-C direto no chip)
 pio device monitor         # monitor serial (115200 baud)
 ```
 
 ## Benchmark dos solvers DARE
 
-ESP32-S2 @ 240 MHz, sistema 6 estados × 3 controles, **800 000 execuções** sob dinâmica real de quadricóptero (resultados publicados em CBA 2026):
+ESP32-S2 @ 240 MHz (placa anterior, sem FPU), sistema 6 estados × 3 controles, **800 000 execuções** sob dinâmica real de quadricóptero (resultados publicados em CBA 2026):
 
 ### Desempenho temporal
 

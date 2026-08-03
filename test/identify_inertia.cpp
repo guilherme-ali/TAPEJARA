@@ -20,7 +20,7 @@
 #include <ctype.h>
 
 #include "MotorControl.h"
-#include "sensor_config.h"
+#include "board_config.h"
 #include "MatrixOperations.h"
 
 #include <Adafruit_MPU6050.h>
@@ -77,8 +77,8 @@ static constexpr uint16_t LOG_VERSION = 1;
 static constexpr uint32_t LOG_DECIMATION = 2;         // 125 Hz de log com loop a 250 Hz
 
 // ======== Sensores ========
-static constexpr int I2C_SDA = 11;
-static constexpr int I2C_SCL = 10;
+static constexpr int I2C_SDA = PIN_I2C_SDA;
+static constexpr int I2C_SCL = PIN_I2C_SCL;
 Adafruit_MPU6050 imu;
 
 

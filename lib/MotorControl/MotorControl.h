@@ -2,15 +2,18 @@
 #define MOTOR_CONTROL_H
 
 #include <Arduino.h>
+#include "board_config.h"
 
 // Configurações dos motores
 #define NUM_MOTORS 4
 
-// Pinos GPIO para cada motor
-#define MOTOR_1_PIN 5
-#define MOTOR_2_PIN 4
-#define MOTOR_3_PIN 3
-#define MOTOR_4_PIN 6
+// Pinos GPIO para cada motor — definidos em include/board_config.h (TPJ-01).
+// M1 frente-esquerda (CCW), M2 frente-direita (CW),
+// M3 trás-direita (CCW),    M4 trás-esquerda (CW).
+#define MOTOR_1_PIN PIN_MOTOR_1
+#define MOTOR_2_PIN PIN_MOTOR_2
+#define MOTOR_3_PIN PIN_MOTOR_3
+#define MOTOR_4_PIN PIN_MOTOR_4
 
 // Configurações de PWM
 #define PWM_FREQUENCY 25000  // 25 kHz

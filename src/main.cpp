@@ -1,5 +1,8 @@
 /**
- * Controle de atitude de quadricoptero em ESP32-S2 com SDRE-LQR (ou PID).
+ * Controle de atitude de quadricoptero na placa Tapejara TPJ-01 v1.0
+ * (ESP32-S3-WROOM-1-N16R8) com SDRE-LQR (ou PID).
+ *
+ * Pinagem em include/board_config.h — inclusive a lista de GPIOs proibidos.
  *
  * Loop principal a 200 Hz (5 ms): IMU + Madgwick + alocacao X-quad.
  * Task paralela (FreeRTOS) recalcula ganhos via DARE — desacopla a Riccati do ciclo.
@@ -16,8 +19,11 @@
 
 // ===== Flags de configuracao =====
 const bool DEBUG_MODE       = false; // true: prints detalhados; false: Serial Plotter
-const bool PRINT_TELEMETRY  = false; // true: stream continuo de roll,pitch,yaw,p,q,r
-const bool USE_MAGNETOMETER = false; // true: 9-DOF (QMC5883L); false: 6-DOF (accel+gyro)
+const bool PRINT_TELEMETRY  = true; // true: stream continuo de roll,pitch,yaw,p,q,r
+// A TPJ-01 traz um QMC5883P (0x2C), nao o QMC5883L (0x0D) da placa antiga —
+// driver proprio em lib/utils/qmc5883p.*. Antes de ligar isto em voo, RECALIBRE:
+// os offsets abaixo sao do chip antigo e nao valem para este.
+const bool USE_MAGNETOMETER = true; // true: 9-DOF (magnetometro); false: 6-DOF (accel+gyro)
 const int  CONTROLLER_TYPE  = 0;     // 0 = SDRE, 1 = PID
 const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: sincrono no loop
 // =================================
@@ -25,7 +31,10 @@ const bool USE_ASYNC_SDRE   = false;  // true: Riccati em FreeRTOS task; false: 
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
 
+#include "board_config.h" // Pinagem da placa TPJ-01 (unica fonte de verdade)
 #include "utils.h"
+#include "bmp280.h"       // Barometro (somente leitura)
+#include "qmc5883p.h"     // Magnetometro (chip da TPJ-01, nao o QMC5883L antigo)
 #include "MotorControl.h" // Incluir controle de motores
 #include "WiFiComm.h" // Comunicação WiFi/UDP
 #include "led_control.h" // Controle de LEDs e bateria
@@ -68,6 +77,21 @@ const float MAX_THRUST    = MOTOR_B_COEFF * MAX_OMEGA * MAX_OMEGA; // N
 float omega_r = 0; // soma signed das velocidades de rotor (acoplamento giroscopico)
 
 float ax, ay, az, gx, gy, gz, mx, my, mz; // leituras IMU/mag (rad/s, g, uT)
+
+// true so' quando USE_MAGNETOMETER esta ligado E o QMC5883P respondeu na init.
+// O AHRS testa esta flag (nao USE_MAGNETOMETER) para nao alimentar o Madgwick
+// com zeros caso o sensor falhe.
+bool mag_ok = false;
+
+// ===== Barometro BMP280 (somente leitura — nao realimenta o controle) =====
+// O sensor converte a ~125 Hz; ler decimado evita gastar I2C no loop de 192 Hz.
+// Cada leitura vira uma amostra ">alt:" no Teleplot (~24 Hz, ~290 B/s).
+const int BARO_DECIMATION_CYCLES = 8;  // ~24 Hz
+bool  baro_ok           = false;
+float baro_p0_pa        = 0.0f; // pressao de referencia (altura zero), fixada no setup
+float baro_pressure_pa  = 0.0f;
+float baro_temperature_c = 0.0f;
+float baro_altitude_m   = 0.0f; // altura RELATIVA a baro_p0_pa
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -174,20 +198,24 @@ const float perc_cutoff = 0.8f;
 const float SENSOR_CUTOFF_HZ = ((1.0f / SAMPLING_TIME_S)/2.0f) * perc_cutoff;
 
 // ===== Calibracao MPU6050 (obtida via test/calibrate_mpu.cpp) =====
-float accel_offset_x =  0.058127f;
-float accel_offset_y = -0.148659f;
-float accel_offset_z =  0.018737f;
-float gyro_offset_x  = -0.007760f;
-float gyro_offset_y  =  0.017851f;
-float gyro_offset_z  =  0.011061f;
+float accel_offset_x = 0.424080f;
+float accel_offset_y = 0.034542f;
+float accel_offset_z = 0.117821f;
+float gyro_offset_x = -0.052348f;
+float gyro_offset_y = 0.013235f;
+float gyro_offset_z = -0.002012f;
 
-// ===== Calibracao QMC5883L (obtida via test/calibrate_magnetometer.cpp) =====
-const float MAG_OFFSET_X =  26.5f;   // Hard-iron
-const float MAG_OFFSET_Y = 221.5f;
-const float MAG_OFFSET_Z = -72.5f;
-const float MAG_SCALE_X = 1.0243f;   // Soft-iron
-const float MAG_SCALE_Y = 0.9575f;
-const float MAG_SCALE_Z = 1.0210f;
+// ===== Calibracao QMC5883P (obter via test/calibrate_magnetometer.cpp) =====
+// ZERADOS DE PROPOSITO. Os valores anteriores (26.5 / 221.5 / -72.5 e escalas
+// 1.0243 / 0.9575 / 1.0210) vieram do QMC5883L da placa antiga: outro chip, outra
+// sensibilidade (3000 vs 3750 LSB/G) e outra orientacao fisica na PCB — aplica-los
+// aqui injetaria um erro de heading grande. Rode a calibracao e substitua.
+const float MAG_OFFSET_X = -372.5f;
+const float MAG_OFFSET_Y = -231.0f;
+const float MAG_OFFSET_Z = -108.0f;
+const float MAG_SCALE_X = 0.9877f;
+const float MAG_SCALE_Y = 1.0520f;
+const float MAG_SCALE_Z = 0.9644f;
 
 MotorControl motors;
 LEDControl   leds;
@@ -346,12 +374,32 @@ void setup() {
     start_IMU_MPU6050(mpu);
 
     if (USE_MAGNETOMETER) {
-        Serial.println("Inicializando QMC5883L (Magnetômetro)...");
-        start_QMC5883L(Wire);
-        setQMC5883LCalibration(MAG_OFFSET_X, MAG_OFFSET_Y, MAG_OFFSET_Z,
-                               MAG_SCALE_X, MAG_SCALE_Y, MAG_SCALE_Z);
+        Serial.println("Inicializando QMC5883P (Magnetômetro)...");
+        mag_ok = start_QMC5883P(Wire);
+        if (mag_ok) {
+            setQMC5883PCalibration(MAG_OFFSET_X, MAG_OFFSET_Y, MAG_OFFSET_Z,
+                                   MAG_SCALE_X, MAG_SCALE_Y, MAG_SCALE_Z);
+        } else {
+            // Sem magnetometro o AHRS cai para 6-DOF em vez de alimentar o
+            // Madgwick com zeros, que arruinaria a estimativa de atitude.
+            Serial.println("⚠️  Magnetômetro indisponível - AHRS seguirá em 6-DOF.");
+        }
     } else {
         Serial.println("⚠️  Magnetômetro DESABILITADO - usando apenas Accel+Gyro (6-DOF)");
+    }
+
+    // ===== Barometro (mesmo barramento I2C do MPU6050) =====
+    // Falha aqui nao trava o boot: o barometro nao entra na malha de controle de
+    // atitude, ao contrario do MPU6050.
+    Serial.println("Inicializando BMP280 (Barômetro)...");
+    baro_ok = start_BMP280(Wire);
+    if (baro_ok) {
+        // Referencia de altura zero: media com o drone parado no chao.
+        baro_p0_pa = bmp280_reference_pressure(30);
+        Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
+                      baro_p0_pa, baro_p0_pa / 100.0f);
+    } else {
+        Serial.println("⚠️  BMP280 indisponível - sem leitura de altura.");
     }
 
     leds.setSensorsCalibration(false);
@@ -397,14 +445,14 @@ void setup() {
         read_MPU6050(mpu, ax, ay, az, gx, gy, gz,
                      accel_offset_x, accel_offset_y, accel_offset_z,
                      gyro_offset_x, gyro_offset_y, gyro_offset_z);
-        if (USE_MAGNETOMETER) read_QMC5883L(mx, my, mz);
+        if (mag_ok) read_QMC5883P(mx, my, mz);
         delay(10);
     }
 
     // Convergencia do quaternion com gyro=0 (drone parado): 100k iteracoes
     // garantem que o Madgwick esteja em regime antes de travar initial_yaw.
     for (int i = 0; i < 100000; i++) {
-        if (USE_MAGNETOMETER) {
+        if (mag_ok) {
             filter.update(0.0f, 0.0f, 0.0f, ax, ay, az, mx, my, mz);
         } else {
             filter.updateIMU(0.0f, 0.0f, 0.0f, ax, ay, az);
@@ -482,10 +530,31 @@ void loop(){
     t_mpu = micros() - t_checkpoint;
     t_checkpoint = micros();
 
+    // ----- Barometro (decimado, so' leitura) -----
+    // Nao realimenta o controle: apenas atualiza a altura relativa e imprime.
+    if (baro_ok) {
+        static int baro_cycle = 0;
+        if (++baro_cycle >= BARO_DECIMATION_CYCLES) {
+            baro_cycle = 0;
+            read_BMP280(baro_pressure_pa, baro_temperature_c);
+            baro_altitude_m = bmp280_altitude(baro_pressure_pa, baro_p0_pa);
+
+            // Formato Teleplot (">serie:valor"), o mesmo do stream de atitude no
+            // fim do loop — as duas saidas convivem no mesmo grafico.
+            // availableForWrite: se o ring buffer do USB CDC estiver cheio (host
+            // parou de drenar), Serial.write bloquearia ate 100 ms e estouraria o
+            // periodo de 5,2 ms do loop. Preferimos perder a amostra.
+            if (PRINT_TELEMETRY && Serial.availableForWrite() >= 32) {
+                Serial.printf(">alt:%.2f\n", baro_altitude_m);
+            }
+        }
+        t_checkpoint = micros(); // baro fora do profiling de t_mag/t_filter
+    }
+
     // ----- Magnetometro (se habilitado) + Madgwick -----
     // Adafruit_MPU6050 retorna gyro em rad/s; Madgwick espera deg/s.
-    if (USE_MAGNETOMETER) {
-        read_QMC5883L(mx, my, mz);
+    if (mag_ok) {
+        read_QMC5883P(mx, my, mz);
         t_mag = micros() - t_checkpoint;
         t_checkpoint = micros();
         filter.update(gx * RAD_TO_DEG, gy * RAD_TO_DEG, gz * RAD_TO_DEG,
@@ -785,8 +854,8 @@ void loop(){
             displayStates(const_cast<float*>(z_measurement));
             
             // Dados do magnetômetro (se habilitado)
-            if (USE_MAGNETOMETER) {
-                Serial.println("\n🧭 MAGNETÔMETRO (QMC5883L):");
+            if (mag_ok) {
+                Serial.println("\n🧭 MAGNETÔMETRO (QMC5883P):");
                 Serial.printf("   Campo Magnético: X=%+.2f  Y=%+.2f  Z=%+.2f μT\n", mx, my, mz);
                 float heading = atan2(my, mx) * RAD_TO_DEG;
                 if (heading < 0) heading += 360.0f;

@@ -11,12 +11,14 @@ extern AutoLQR sdreController;
 // ============= FUNÇÕES DE INICIALIZAÇÃO =============
 
 void start_IMU_MPU6050(Adafruit_MPU6050& mpu) {
-    // Inicializa I2C com os pinos corretos para ESP32-S2
-    Wire.begin(11, 10); // SDA = GPIO11, SCL = GPIO10
+    // Abre o barramento I2C da TPJ-01. E' o UNICO Wire.begin() do firmware — o
+    // barometro e o magnetometro compartilham este barramento e so configuram
+    // seus proprios registradores.
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
 
-    Wire.setClock(400000); // 400 kHz - max do MPU6050 segundo datasheet (1 MHz violava spec)
+    Wire.setClock(I2C_CLOCK_HZ); // 400 kHz - max do MPU6050 segundo datasheet (1 MHz violava spec)
 
-    if (!mpu.begin(0x68, &Wire)) {
+    if (!mpu.begin(ADDR_MPU6050, &Wire)) {
         Serial.println("Falha ao inicializar MPU6050!");
         while (1) {
             delay(10);
@@ -129,7 +131,7 @@ void read_MPU6050_raw(float& ax, float& ay, float& az,
                       float accel_offset_x, float accel_offset_y, float accel_offset_z,
                       float gyro_offset_x, float gyro_offset_y, float gyro_offset_z) {
     // Burst read dos 14 bytes a partir de ACCEL_XOUT_H. Pula a Adafruit_BusIO/getEvent,
-    // que na stack Wire do ESP32-S2 custa ~1 ms por leitura.
+    // que custa ~1 ms por leitura (medido no ESP32-S2 da placa anterior).
     Wire.beginTransmission(MPU6050_I2C_ADDR);
     Wire.write(MPU6050_ACCEL_XOUT);
     Wire.endTransmission(false);                       // repeated-start (sem soltar o barramento)
@@ -182,7 +184,8 @@ void read_MPU6050_raw(float& ax, float& ay, float& az,
 }
 
 // ============= FUNÇÕES DO QMC5883L (Magnetômetro) =============
-// Compartilha o barramento I2C do MPU6050 (SDA=GPIO11, SCL=GPIO10, 400 kHz).
+// Compartilha o barramento I2C do MPU6050 (pinos e clock em board_config.h).
+// NOTA: a TPJ-01 traz um QMC5883P, incompativel com este driver (feito para o 'L').
 // Implementacao bare-metal (sem lib externa) para nao acoplar a Adafruit_Sensor.
 
 #define QMC5883L_ADDR 0x0D
@@ -328,23 +331,30 @@ void calculateMotorOmegaSq(float thrust_signal, float u_torques[],
     float u3 = u_torques[1];  // Torque de Arfagem     [N·m]
     float u4 = u_torques[2];  // Torque de Guinada     [N·m]
 
-    // Relação direta (u = T*ω²):
-    // [u1]   [  b     b     b     b ] [ω1²]
-    // [u2] = [-bL   -bL    bL    bL ] [ω2²]
-    // [u3]   [  bL  -bL   -bL    bL ] [ω3²]
-    // [u4]   [ -d     d    -d     d ] [ω4²]
-    //
     // Matriz de alocação de controle inversa (ω² = T^(-1)*u), config X-quad.
-    // Sinais da coluna de yaw invertidos para casar com o sentido fisico
-    // (motores 2 e 4 CCW devem acelerar para u4 > 0).
-    // [ω1²]   [1/(4b)  -1/(4bL)   1/(4bL)  -1/(4d)] [u1]
-    // [ω2²] = [1/(4b)  -1/(4bL)  -1/(4bL)   1/(4d)] [u2]
-    // [ω3²]   [1/(4b)   1/(4bL)  -1/(4bL)  -1/(4d)] [u3]
-    // [ω4²]   [1/(4b)   1/(4bL)   1/(4bL)   1/(4d)] [u4]
-    w1_sq = u1 * inv_4b - u2 * inv_4bL + u3 * inv_4bL - u4 * inv_4d; // Motor 1 (FR, CW)
-    w2_sq = u1 * inv_4b - u2 * inv_4bL - u3 * inv_4bL + u4 * inv_4d; // Motor 2 (RR, CCW)
-    w3_sq = u1 * inv_4b + u2 * inv_4bL - u3 * inv_4bL - u4 * inv_4d; // Motor 3 (RL, CW)
-    w4_sq = u1 * inv_4b + u2 * inv_4bL + u3 * inv_4bL + u4 * inv_4d; // Motor 4 (FL, CCW)
+    // Sinais da coluna de yaw casam com o sentido fisico (os motores CCW devem
+    // acelerar para u4 > 0). Convencoes: u2 > 0 rola para a direita, u3 > 0 leva
+    // o nariz para cima.
+    //
+    // Numeracao dos motores na TPJ-01 (serigrafia da PCB, frente = topo da placa,
+    // pinos em include/board_config.h):
+    //   M1 = IO8  frente-esquerda (CCW)
+    //   M2 = IO48 frente-direita  (CW)
+    //   M3 = IO2  tras-direita    (CCW)
+    //   M4 = IO4  tras-esquerda   (CW)
+    // Em relacao ao drone anterior (M1=FR, M2=RR, M3=RL, M4=FL) isto e' apenas
+    // uma permutacao das linhas — nenhum sinal ou coeficiente muda, a sintonia do
+    // SDRE segue valida.
+    //
+    //           [   u1        u2         u3        u4    ]
+    // [ω1²]   [1/(4b)   1/(4bL)    1/(4bL)   1/(4d)]  FL, CCW
+    // [ω2²] = [1/(4b)  -1/(4bL)    1/(4bL)  -1/(4d)]  FR, CW
+    // [ω3²]   [1/(4b)  -1/(4bL)   -1/(4bL)   1/(4d)]  RR, CCW
+    // [ω4²]   [1/(4b)   1/(4bL)   -1/(4bL)  -1/(4d)]  RL, CW
+    w1_sq = u1 * inv_4b + u2 * inv_4bL + u3 * inv_4bL + u4 * inv_4d; // Motor 1 (FL, CCW)
+    w2_sq = u1 * inv_4b - u2 * inv_4bL + u3 * inv_4bL - u4 * inv_4d; // Motor 2 (FR, CW)
+    w3_sq = u1 * inv_4b - u2 * inv_4bL - u3 * inv_4bL + u4 * inv_4d; // Motor 3 (RR, CCW)
+    w4_sq = u1 * inv_4b + u2 * inv_4bL - u3 * inv_4bL - u4 * inv_4d; // Motor 4 (RL, CW)
 
     // Garante que não há valores negativos (motores não podem girar ao contrário)
     if (w1_sq < 0) w1_sq = 0;
@@ -433,8 +443,8 @@ void displayMotorOmegaSq(float thrust_signal, float u_torques[],
 }
 
 void displayMotorOmegaSqDetailed(float w1_sq, float w2_sq, float w3_sq, float w4_sq) {
-    Serial.print("GPIO3(ω²): ");    Serial.print(w1_sq, 2);
-    Serial.print(" | GPIO4(ω²): "); Serial.print(w2_sq, 2);
-    Serial.print(" | GPIO5(ω²): "); Serial.print(w3_sq, 2);
-    Serial.print(" | GPIO6(ω²): "); Serial.println(w4_sq, 2);
+    Serial.printf("M1/FL/IO%d(ω²): %.2f", PIN_MOTOR_1, w1_sq);
+    Serial.printf(" | M2/FR/IO%d(ω²): %.2f", PIN_MOTOR_2, w2_sq);
+    Serial.printf(" | M3/RR/IO%d(ω²): %.2f", PIN_MOTOR_3, w3_sq);
+    Serial.printf(" | M4/RL/IO%d(ω²): %.2f\n", PIN_MOTOR_4, w4_sq);
 }

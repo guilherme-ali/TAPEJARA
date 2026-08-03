@@ -1,19 +1,29 @@
 # utils
 
-Helpers compartilhados pelo `main.cpp`: drivers de sensores (MPU6050, QMC5883L), controle de LEDs/bateria e a alocação de controle X-quad.
+Helpers compartilhados pelo `main.cpp`: drivers de sensores (MPU6050, BMP280, QMC5883L), controle de LEDs/bateria e a alocação de controle X-quad.
 
 ## Conteúdo
 
 | Arquivo                  | Responsabilidade                                                                 |
 |--------------------------|----------------------------------------------------------------------------------|
 | `utils.h` / `utils.cpp`  | Inicialização, calibração e leitura do MPU6050; driver bare-metal do QMC5883L (I2C direto); alocação X-quad (torques → ω²); helpers de display no Serial (incluindo `displayGains` para K e Kr do SDRE). |
-| `led_control.h` / `.cpp` | Classe `LEDControl` — gerencia LEDs (blue/green/red), modos blink, leitura de bateria via ADC e thresholds (low/critical). |
+| `bmp280.h` / `.cpp`      | Driver bare-metal do barômetro BMP280 (I2C direto): pressão, temperatura e altura relativa a uma referência capturada no boot. **Somente leitura** — não realimenta o controle. |
+| `qmc5883p.h` / `.cpp`    | Driver do magnetômetro QMC5883P da TPJ-01 (`0x2C`): init, leitura em µT com calibração hard/soft-iron e leitura crua em LSB para o sketch de calibração. |
+| `led_control.h` / `.cpp` | Classe `LEDControl` — gerencia os 4 LEDs da TPJ-01 em dois canais (verdes = status, vermelhos = alerta), modos blink, leitura de bateria via ADC e thresholds (low/critical). |
 
 ## Conexões I2C
 
-- **SDA** = GPIO11, **SCL** = GPIO10, **clock** = 400 kHz
-- MPU6050 em `0x68`
-- QMC5883L em `0x0D` (compartilha barramento; `start_QMC5883L` reusa o `Wire` já inicializado pelo MPU)
+Pinos e endereços em [`include/board_config.h`](../../include/board_config.h) — barramento único.
+
+- **SDA** = IO39, **SCL** = IO40, **clock** = 400 kHz (pull-ups de 4,7 kΩ na placa)
+- MPU6050 em `0x68` — `start_IMU_MPU6050` é o **único** `Wire.begin()` do firmware
+- BMP280 em `0x76` (`start_BMP280` reusa o `Wire` já inicializado)
+- QMC5883**P** em **`0x2C`** (`start_QMC5883P` reusa o `Wire`) — ⚠️ o esquemático anota `0x0D`,
+  que é o endereço do QMC5883**L**; o `0x2C` vem do datasheet do 'P' (seção 5.4). Ver `qmc5883p.h`
+  para a tabela completa de diferenças entre os dois chips.
+
+As funções `start_QMC5883L` / `read_QMC5883L` em `utils.cpp` são do chip da **placa anterior** e
+não funcionam na TPJ-01 — mantidas apenas como referência histórica.
 
 ## Leitura rápida do MPU (`read_MPU6050_raw`)
 

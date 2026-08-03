@@ -1,9 +1,9 @@
 /**
  * ============================================================================
- * CALIBRAÇÃO DO MAGNETÔMETRO QMC5883L
+ * CALIBRAÇÃO DO MAGNETÔMETRO QMC5883P
  * ============================================================================
  * 
- * Este script realiza a calibração do magnetômetro QMC5883L para corrigir:
+ * Este script realiza a calibração do magnetômetro QMC5883P para corrigir:
  * 1. Hard-Iron Distortion (offset) - Campos magnéticos fixos do hardware
  * 2. Soft-Iron Distortion (escala) - Distorções causadas por materiais próximos
  * 
@@ -19,33 +19,23 @@
  * 
  * CONEXÕES:
  * ---------
- * QMC5883L SDA -> GPIO40
- * QMC5883L SCL -> GPIO41
- * QMC5883L VCC -> 3.3V
- * QMC5883L GND -> GND
- * 
+ * Barramento I2C da placa (pinos em include/board_config.h).
+ *
+ * CHIP: QMC5883P (Tapejara TPJ-01), endereço 0x2C. Init e leitura vêm de
+ * lib/utils/qmc5883p.* — este sketch não duplica o mapa de registradores, que é
+ * justamente o que fazia a versão antiga (escrita para o QMC5883L, 0x0D) falhar.
+ *
  * ============================================================================
  */
 
 #include <Arduino.h>
 #include <Wire.h>
+#include "board_config.h"
+#include "qmc5883p.h"
 
 // ===== CONFIGURAÇÃO =====
 #define CALIBRATION_TIME_MS 30000  // Tempo de calibração (30 segundos)
 #define SAMPLE_DELAY_MS 20         // Delay entre amostras (50Hz)
-
-// ===== DEFINIÇÕES DO QMC5883L =====
-#define QMC5883L_ADDR 0x0D
-
-// Registros
-#define QMC5883L_REG_DATA       0x00
-#define QMC5883L_REG_STATUS     0x06
-#define QMC5883L_REG_CONTROL1   0x09
-#define QMC5883L_REG_CONTROL2   0x0A
-#define QMC5883L_REG_SET_RESET  0x0B
-
-// Segundo barramento I2C (já definido pela biblioteca Wire do ESP32)
-// extern TwoWire Wire1; // Removido, usando Wire padrão
 
 // ===== VARIÁVEIS DE CALIBRAÇÃO =====
 int16_t x_min = 32767, x_max = -32768;
@@ -56,62 +46,24 @@ int16_t z_min = 32767, z_max = -32768;
 float offset_x, offset_y, offset_z;
 float scale_x, scale_y, scale_z;
 
-// ===== FUNÇÕES DO QMC5883L =====
-void writeReg(uint8_t reg, uint8_t value) {
-    Wire.beginTransmission(QMC5883L_ADDR);
-    Wire.write(reg);
-    Wire.write(value);
-    Wire.endTransmission();
-}
+// ===== ACESSO AO SENSOR (via lib/utils/qmc5883p.*) =====
+// Este sketch roda sozinho, então precisa abrir o barramento I2C ele mesmo —
+// no firmware quem faz isso é start_IMU_MPU6050().
+bool initMagnetometer() {
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
+    Wire.setClock(I2C_CLOCK_HZ);
 
-bool initQMC5883L() {
-    // Inicializa I2C1 nos pinos corretos (MPU6050 já faz Wire.begin em outros arquivos,
-    // mas aqui estamos rodando sozinhos)
-    Wire.begin(11, 10);  // SDA = GPIO11, SCL = GPIO10
-    Wire.setClock(400000);
-    
-    // Verifica se o sensor está presente
-    Wire.beginTransmission(QMC5883L_ADDR);
-    uint8_t error = Wire.endTransmission();
-    
-    if (error != 0) {
-        Serial.println("❌ ERRO: QMC5883L não encontrado!");
+    if (!start_QMC5883P(Wire)) {
         Serial.println("   Verifique as conexões:");
-        Serial.println("   - SDA -> GPIO11");
-        Serial.println("   - SCL -> GPIO10");
-        Serial.println("   - VCC -> 3.3V");
-        Serial.println("   - GND -> GND");
+        Serial.printf("   - SDA -> GPIO%d\n", PIN_I2C_SDA);
+        Serial.printf("   - SCL -> GPIO%d\n", PIN_I2C_SCL);
+        Serial.println("   Ou rode test/i2c_scan.cpp para ver quem responde.");
         return false;
     }
-    
-    // Soft Reset
-    writeReg(QMC5883L_REG_CONTROL2, 0x80);
-    delay(10);
-    
-    // Define período SET/RESET
-    writeReg(QMC5883L_REG_SET_RESET, 0x01);
-    
-    // Configura: Modo Contínuo, ODR 200Hz, Range 8G, OSR 512
-    writeReg(QMC5883L_REG_CONTROL1, 0x01 | 0x0C | 0x10 | 0x00);
-    
-    Serial.println("✅ QMC5883L inicializado com sucesso!");
-    return true;
-}
 
-bool readRawQMC5883L(int16_t& x, int16_t& y, int16_t& z) {
-    Wire.beginTransmission(QMC5883L_ADDR);
-    Wire.write(QMC5883L_REG_DATA);
-    Wire.endTransmission();
-    
-    Wire.requestFrom((uint8_t)QMC5883L_ADDR, (uint8_t)6);
-    
-    if (Wire.available() >= 6) {
-        x = Wire.read() | (Wire.read() << 8);
-        y = Wire.read() | (Wire.read() << 8);
-        z = Wire.read() | (Wire.read() << 8);
-        return true;
-    }
-    return false;
+    // Calibração neutra: queremos as amostras CRUAS para levantar os coeficientes.
+    setQMC5883PCalibration(0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f);
+    return true;
 }
 
 void setup() {
@@ -120,11 +72,11 @@ void setup() {
     
     Serial.println();
     Serial.println("╔══════════════════════════════════════════════════════════════╗");
-    Serial.println("║        CALIBRAÇÃO DO MAGNETÔMETRO QMC5883L                   ║");
+    Serial.println("║        CALIBRAÇÃO DO MAGNETÔMETRO QMC5883P                   ║");
     Serial.println("╚══════════════════════════════════════════════════════════════╝");
     Serial.println();
     
-    if (!initQMC5883L()) {
+    if (!initMagnetometer()) {
         Serial.println("❌ Falha na inicialização. Reinicie o dispositivo.");
         while(1) delay(1000);
     }
@@ -162,7 +114,7 @@ void setup() {
     while (millis() - startTime < CALIBRATION_TIME_MS) {
         int16_t x, y, z;
         
-        if (readRawQMC5883L(x, y, z)) {
+        if (read_QMC5883P_raw(x, y, z)) {
             // Atualiza mínimos e máximos
             if (x < x_min) x_min = x;
             if (x > x_max) x_max = x;
@@ -233,7 +185,7 @@ void setup() {
     Serial.println("║     COPIE O CÓDIGO ABAIXO PARA O ARQUIVO main.cpp            ║");
     Serial.println("╚══════════════════════════════════════════════════════════════╝");
     Serial.println();
-    Serial.println("// ===== CALIBRAÇÃO DO MAGNETÔMETRO QMC5883L =====");
+    Serial.println("// ===== CALIBRAÇÃO DO MAGNETÔMETRO QMC5883P =====");
     Serial.printf("const float MAG_OFFSET_X = %.1ff;\n", offset_x);
     Serial.printf("const float MAG_OFFSET_Y = %.1ff;\n", offset_y);
     Serial.printf("const float MAG_OFFSET_Z = %.1ff;\n", offset_z);
@@ -244,22 +196,12 @@ void setup() {
     Serial.println();
     
     Serial.println("╔══════════════════════════════════════════════════════════════╗");
-    Serial.println("║     ADICIONE ESTA FUNÇÃO OU MODIFIQUE read_QMC5883L()        ║");
+    Serial.println("║  COLE OS 6 VALORES ACIMA EM src/main.cpp                     ║");
     Serial.println("╚══════════════════════════════════════════════════════════════╝");
     Serial.println();
-    Serial.println("// No arquivo utils.cpp, modifique a função read_QMC5883L:");
-    Serial.println("// Após ler x_raw, y_raw, z_raw, aplique a calibração:");
-    Serial.println("//");
-    Serial.println("//   // Aplica calibração Hard-Iron e Soft-Iron");
-    Serial.printf("//   float x_cal = (x_raw - %.1ff) * %.4ff;\n", offset_x, scale_x);
-    Serial.printf("//   float y_cal = (y_raw - %.1ff) * %.4ff;\n", offset_y, scale_y);
-    Serial.printf("//   float z_cal = (z_raw - %.1ff) * %.4ff;\n", offset_z, scale_z);
-    Serial.println("//");
-    Serial.println("//   // Converte para µT");
-    Serial.println("//   const float SCALE_FACTOR = 1.0f / 30.0f;");
-    Serial.println("//   mx = x_cal * SCALE_FACTOR;");
-    Serial.println("//   my = y_cal * SCALE_FACTOR;");
-    Serial.println("//   mz = z_cal * SCALE_FACTOR;");
+    Serial.println("// Substitua o bloco \"Calibracao QMC5883P\" em src/main.cpp.");
+    Serial.println("// setQMC5883PCalibration() ja aplica offset e escala dentro do");
+    Serial.println("// driver (lib/utils/qmc5883p.cpp) - nao ha nada a editar la.");
     Serial.println();
     
     // Verifica qualidade da calibração
@@ -301,14 +243,14 @@ void setup() {
 void loop() {
     int16_t x_raw, y_raw, z_raw;
     
-    if (readRawQMC5883L(x_raw, y_raw, z_raw)) {
+    if (read_QMC5883P_raw(x_raw, y_raw, z_raw)) {
         // Aplica calibração
         float x_cal = (x_raw - offset_x) * scale_x;
         float y_cal = (y_raw - offset_y) * scale_y;
         float z_cal = (z_raw - offset_z) * scale_z;
         
         // Converte para µT
-        const float SCALE_FACTOR = 1.0f / 30.0f;
+        const float SCALE_FACTOR = 1.0f / 37.5f;
         float mx = x_cal * SCALE_FACTOR;
         float my = y_cal * SCALE_FACTOR;
         float mz = z_cal * SCALE_FACTOR;
