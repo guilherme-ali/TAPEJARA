@@ -39,13 +39,15 @@ bool start_QMC5883P(TwoWire& wireInstance);
 void setQMC5883PCalibration(float offset_x, float offset_y, float offset_z,
                             float scale_x, float scale_y, float scale_z);
 
-// Lê o campo magnético em µT, já calibrado. Em falha de I2C mantém os últimos
-// valores válidos (o Madgwick normaliza o vetor, então um repeat é inofensivo;
-// um zero súbito não seria).
+// Lê o campo magnético em µT, já calibrado e no frame do MPU6050 (ver
+// QMC5883P_AXIS_SIGN_* no .cpp). Em falha de I2C mantém os últimos valores
+// válidos (o Madgwick normaliza o vetor, então um repeat é inofensivo; um zero
+// súbito não seria).
 void read_QMC5883P(float& mx, float& my, float& mz);
 
-// Leitura crua em LSB, sem calibração — usada por test/calibrate_magnetometer.cpp
-// para levantar os coeficientes hard/soft-iron. Retorna false em falha de I2C.
+// Leitura crua em LSB, sem calibração e no frame cru do chip — usada por
+// test/calibrate_magnetometer.cpp para levantar os coeficientes hard/soft-iron.
+// Retorna false em falha de I2C.
 bool read_QMC5883P_raw(int16_t& x, int16_t& y, int16_t& z);
 
 #endif // QMC5883P_H

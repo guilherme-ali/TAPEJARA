@@ -19,6 +19,15 @@
 // 1 Gauss = 100 µT  ->  µT = LSB / 3750 * 100 = LSB / 37.5
 #define QMC5883P_LSB_PER_UT  37.5f
 
+// Alinhamento com o frame do MPU6050: a tríade do QMC5883P sai girada 180° em
+// torno de X, o que invertia o sentido do yaw fundido em relação ao integrado
+// pelo giroscópio. (x, -y, -z) é rotação própria — negar só Y também corrigiria
+// o azimute, mas como reflexão deixaria o eixo vertical errado e o heading
+// passaria a derivar com o tilt. Ajuste só estes três sinais se a montagem mudar.
+#define QMC5883P_AXIS_SIGN_X  (+1.0f)
+#define QMC5883P_AXIS_SIGN_Y  (-1.0f)
+#define QMC5883P_AXIS_SIGN_Z  (-1.0f)
+
 // ============= ESTADO DO DRIVER =============
 static TwoWire* _qmc_wire = nullptr;
 
@@ -133,14 +142,17 @@ void read_QMC5883P(float& mx, float& my, float& mz) {
         return;
     }
 
-    // Hard-iron (offset) e soft-iron (escala), ambos em LSB
+    // Hard-iron (offset) e soft-iron (escala), ambos em LSB. Antes do
+    // remapeamento de eixos: os coeficientes vêm de read_QMC5883P_raw(), no
+    // frame cru, e inverter o sinal antes deslocaria o centro do elipsoide.
     float x_cal = (x_raw - _mag_offset_x) * _mag_scale_x;
     float y_cal = (y_raw - _mag_offset_y) * _mag_scale_y;
     float z_cal = (z_raw - _mag_offset_z) * _mag_scale_z;
 
-    mx = x_cal / QMC5883P_LSB_PER_UT;
-    my = y_cal / QMC5883P_LSB_PER_UT;
-    mz = z_cal / QMC5883P_LSB_PER_UT;
+    // Frame cru do chip -> frame do MPU6050 (ver nota em QMC5883P_AXIS_SIGN_*).
+    mx = QMC5883P_AXIS_SIGN_X * x_cal / QMC5883P_LSB_PER_UT;
+    my = QMC5883P_AXIS_SIGN_Y * y_cal / QMC5883P_LSB_PER_UT;
+    mz = QMC5883P_AXIS_SIGN_Z * z_cal / QMC5883P_LSB_PER_UT;
 
     _last_mx = mx;
     _last_my = my;
