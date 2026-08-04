@@ -51,7 +51,7 @@ const float Ixx   = 42.95e-6f;  // kg·m^2 — inercia roll
 const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
 const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
-const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
+const float L_ARM = 0.0475f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
 const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.002f : 0.002f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
 // Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
@@ -63,12 +63,12 @@ const int TELEMETRY_DECIMATION_CYCLES = 5;
 // ===== Coeficientes motor + helice (medidos via test/motor_calibration_test.cpp) =====
 
 // helice 45mm
-//const float MOTOR_B_COEFF = 1.77e-8f;   // N/(rad/s)^2 — empuxo medido
-//const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
+const float MOTOR_B_COEFF = 1.77e-8f;   // N/(rad/s)^2 — empuxo medido
+const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
 
 // helice 55mm (em uso)
-const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
-const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
+//const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
+//const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
 
 const float MOTOR_D_COEFF = 0.05f * MOTOR_B_COEFF;         // N·m/(rad/s)^2 — drag (estimado)
 const float MAX_OMEGA     = (MAX_RPM * 2.0f * PI) / 60.0f; // ~2769 rad/s

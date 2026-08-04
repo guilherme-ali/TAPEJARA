@@ -333,8 +333,7 @@ void calculateMotorOmegaSq(float thrust_signal, float u_torques[],
 
     // Matriz de alocação de controle inversa (ω² = T^(-1)*u), config X-quad.
     // Sinais da coluna de yaw casam com o sentido fisico (os motores CCW devem
-    // acelerar para u4 > 0). Convencoes: u2 > 0 rola para a direita, u3 > 0 leva
-    // o nariz para cima.
+    // acelerar para u4 > 0).
     //
     // Numeracao dos motores na TPJ-01 (serigrafia da PCB, frente = topo da placa,
     // pinos em include/board_config.h):
@@ -347,14 +346,14 @@ void calculateMotorOmegaSq(float thrust_signal, float u_torques[],
     // SDRE segue valida.
     //
     //           [   u1        u2         u3        u4    ]
-    // [ω1²]   [1/(4b)   1/(4bL)    1/(4bL)   1/(4d)]  FL, CCW
-    // [ω2²] = [1/(4b)  -1/(4bL)    1/(4bL)  -1/(4d)]  FR, CW
-    // [ω3²]   [1/(4b)  -1/(4bL)   -1/(4bL)   1/(4d)]  RR, CCW
-    // [ω4²]   [1/(4b)   1/(4bL)   -1/(4bL)  -1/(4d)]  RL, CW
-    w1_sq = u1 * inv_4b + u2 * inv_4bL + u3 * inv_4bL + u4 * inv_4d; // Motor 1 (FL, CCW)
-    w2_sq = u1 * inv_4b - u2 * inv_4bL + u3 * inv_4bL - u4 * inv_4d; // Motor 2 (FR, CW)
-    w3_sq = u1 * inv_4b - u2 * inv_4bL - u3 * inv_4bL + u4 * inv_4d; // Motor 3 (RR, CCW)
-    w4_sq = u1 * inv_4b + u2 * inv_4bL - u3 * inv_4bL - u4 * inv_4d; // Motor 4 (RL, CW)
+    // [ω1²]   [1/(4b)   1/(4bL)   -1/(4bL)   1/(4d)]  FL, CCW
+    // [ω2²] = [1/(4b)  -1/(4bL)   -1/(4bL)  -1/(4d)]  FR, CW
+    // [ω3²]   [1/(4b)  -1/(4bL)    1/(4bL)   1/(4d)]  RR, CCW
+    // [ω4²]   [1/(4b)   1/(4bL)    1/(4bL)  -1/(4d)]  RL, CW
+    w1_sq = u1 * inv_4b + u2 * inv_4bL - u3 * inv_4bL + u4 * inv_4d; // Motor 1 (FL, CCW)
+    w2_sq = u1 * inv_4b - u2 * inv_4bL - u3 * inv_4bL - u4 * inv_4d; // Motor 2 (FR, CW)
+    w3_sq = u1 * inv_4b - u2 * inv_4bL + u3 * inv_4bL + u4 * inv_4d; // Motor 3 (RR, CCW)
+    w4_sq = u1 * inv_4b + u2 * inv_4bL + u3 * inv_4bL - u4 * inv_4d; // Motor 4 (RL, CW)
 
     // Garante que não há valores negativos (motores não podem girar ao contrário)
     if (w1_sq < 0) w1_sq = 0;
