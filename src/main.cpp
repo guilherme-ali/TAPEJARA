@@ -19,7 +19,7 @@
 
 // ===== Flags de configuracao =====
 const bool DEBUG_MODE       = false; // true: prints detalhados; false: Serial Plotter
-const bool PRINT_TELEMETRY  = false; // true: stream continuo de roll,pitch,yaw,p,q,r
+const bool PRINT_TELEMETRY  = true; // true: stream continuo de roll,pitch,yaw,p,q,r
 // A TPJ-01 traz um QMC5883P (0x2C), nao o QMC5883L (0x0D) da placa antiga —
 // driver proprio em lib/utils/qmc5883p.*. Antes de ligar isto em voo, RECALIBRE:
 // os offsets abaixo sao do chip antigo e nao valem para este.
@@ -201,12 +201,12 @@ const float perc_cutoff = 0.8f;
 const float SENSOR_CUTOFF_HZ = ((1.0f / SAMPLING_TIME_S)/2.0f) * perc_cutoff;
 
 // ===== Calibracao MPU6050 (obtida via test/calibrate_mpu.cpp) =====
-float accel_offset_x = 0.424080f;
-float accel_offset_y = 0.034542f;
-float accel_offset_z = 0.117821f;
-float gyro_offset_x = -0.052348f;
-float gyro_offset_y = 0.013235f;
-float gyro_offset_z = -0.002012f;
+float accel_offset_x = 0.428309f;
+float accel_offset_y = 0.075853f;
+float accel_offset_z = -0.016839f;
+float gyro_offset_x = 0.114426f;
+float gyro_offset_y = 0.016302f;
+float gyro_offset_z = -0.001749f;
 
 // ===== Calibracao QMC5883P (obter via test/calibrate_magnetometer.cpp) =====
 const float MAG_OFFSET_X = -405.0f;

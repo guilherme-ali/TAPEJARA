@@ -51,8 +51,8 @@ const float Ixx   = 42.95e-6f;  // kg·m^2 — inercia roll
 const float Iyy   = 37.77e-6f;  // kg·m^2 — inercia pitch
 const float Izz   = 76.15e-6f;  // kg·m^2 — inercia yaw
 const float Ir    = 1.02e-7f;   // kg·m^2 — inercia do rotor
-const float L_ARM = 0.060f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
-const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.005f : 0.0052f;
+const float L_ARM = 0.0475f * 0.70710678f; // 60 mm * sin(45°) — braco efetivo em config X
+const float SAMPLING_TIME_S         = USE_ASYNC_SDRE ? 0.002f : 0.002f;
 const unsigned long LOOP_PERIOD_US  = static_cast<unsigned long>(SAMPLING_TIME_S * 1e6f);
 // Telemetria decimada: grava 1 amostra a cada N ciclos do loop. Buffer (CAPACITY
 // fixo, ver Telemetry.h) cobre CAPACITY*N*SAMPLING_TIME_S segundos de voo.
@@ -63,12 +63,12 @@ const int TELEMETRY_DECIMATION_CYCLES = 5;
 // ===== Coeficientes motor + helice (medidos via test/motor_calibration_test.cpp) =====
 
 // helice 45mm
-//const float MOTOR_B_COEFF = 1.77e-8f;   // N/(rad/s)^2 — empuxo medido
-//const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
+const float MOTOR_B_COEFF = 1.77e-8f;   // N/(rad/s)^2 — empuxo medido
+const float MAX_RPM       = 31086.0f;   // RPM @ 100% duty
 
 // helice 55mm (em uso)
-const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
-const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
+//const float MOTOR_B_COEFF = 2.98e-8f;                      // N/(rad/s)^2 — empuxo medido
+//const float MAX_RPM       = 26423.0f;                      // RPM @ 100% duty
 
 const float MOTOR_D_COEFF = 0.05f * MOTOR_B_COEFF;         // N·m/(rad/s)^2 — drag (estimado)
 const float MAX_OMEGA     = (MAX_RPM * 2.0f * PI) / 60.0f; // ~2769 rad/s
@@ -84,9 +84,12 @@ float ax, ay, az, gx, gy, gz, mx, my, mz; // leituras IMU/mag (rad/s, g, uT)
 bool mag_ok = false;
 
 // ===== Barometro BMP280 (somente leitura — nao realimenta o controle) =====
-// O sensor converte a ~125 Hz; ler decimado evita gastar I2C no loop de 192 Hz.
-// Cada leitura vira uma amostra ">alt:" no Teleplot (~24 Hz, ~290 B/s).
-const int BARO_DECIMATION_CYCLES = 8;  // ~24 Hz
+// O sensor converte a 26,3 Hz (ODR do preset "Indoor navigation"); ler decimado
+// evita gastar I2C no loop de 192 Hz. A decimacao tem que ficar abaixo do ODR
+// MINIMO de 23,1 Hz (Tabela 13 do datasheet, 43,2 ms de conversao no pior caso),
+// senao parte das leituras repete a amostra anterior.
+// Cada leitura vira uma amostra ">alt:" no Teleplot (~19 Hz, ~230 B/s).
+const int BARO_DECIMATION_CYCLES = 10;  // ~19,2 Hz
 bool  baro_ok           = false;
 float baro_p0_pa        = 0.0f; // pressao de referencia (altura zero), fixada no setup
 float baro_pressure_pa  = 0.0f;
@@ -198,12 +201,12 @@ const float perc_cutoff = 0.8f;
 const float SENSOR_CUTOFF_HZ = ((1.0f / SAMPLING_TIME_S)/2.0f) * perc_cutoff;
 
 // ===== Calibracao MPU6050 (obtida via test/calibrate_mpu.cpp) =====
-float accel_offset_x = 0.424080f;
-float accel_offset_y = 0.034542f;
-float accel_offset_z = 0.117821f;
-float gyro_offset_x = -0.052348f;
-float gyro_offset_y = 0.013235f;
-float gyro_offset_z = -0.002012f;
+float accel_offset_x = 0.428309f;
+float accel_offset_y = 0.075853f;
+float accel_offset_z = -0.016839f;
+float gyro_offset_x = 0.114426f;
+float gyro_offset_y = 0.016302f;
+float gyro_offset_z = -0.001749f;
 
 // ===== Calibracao QMC5883P (obter via test/calibrate_magnetometer.cpp) =====
 const float MAG_OFFSET_X = -405.0f;
@@ -391,9 +394,15 @@ void setup() {
     baro_ok = start_BMP280(Wire);
     if (baro_ok) {
         // Referencia de altura zero: media com o drone parado no chao.
-        baro_p0_pa = bmp280_reference_pressure(1000);
-        Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
-                      baro_p0_pa, baro_p0_pa / 100.0f);
+        // Bloqueia ~5,3 s (3 s de assentamento do IIR x16 + 50 * 45 ms).
+        baro_p0_pa = bmp280_reference_pressure(50);
+        if (baro_p0_pa > 0.0f) {
+            Serial.printf("   Referência de altura zero: %.1f Pa (%.2f hPa)\n",
+                          baro_p0_pa, baro_p0_pa / 100.0f);
+        } else {
+            baro_ok = false;
+            Serial.println("⚠️  BMP280 parou de responder na referência - sem leitura de altura.");
+        }
     } else {
         Serial.println("⚠️  BMP280 indisponível - sem leitura de altura.");
     }
@@ -533,7 +542,8 @@ void loop(){
         if (++baro_cycle >= BARO_DECIMATION_CYCLES) {
             baro_cycle = 0;
             read_BMP280(baro_pressure_pa, baro_temperature_c);
-            baro_altitude_m = bmp280_altitude(baro_pressure_pa, baro_p0_pa);
+            baro_altitude_m = bmp280_altitude(baro_pressure_pa, baro_p0_pa,
+                                              baro_temperature_c);
 
             // Formato Teleplot (">serie:valor"), o mesmo do stream de atitude no
             // fim do loop — as duas saidas convivem no mesmo grafico.
@@ -820,6 +830,11 @@ void loop(){
                 Serial.println("\n⚙️  SDRE TASK (fora do loop de 5ms):");
                 Serial.printf("   updateSystemMatrix: %4lu μs\n", sdre_t_updateMatrix);
                 Serial.printf("   computeGains (DARE): %4lu μs\n", sdre_t_computeGains);
+                // Iteracoes/residuo do SDA: se iter bater no teto (30) o solver esta
+                // estagnando e o tempo esta sendo gasto a toa — ver criterio de parada.
+                Serial.printf("   SDA: %d iteracoes, residuo %.2e\n",
+                              sdreController.getLastIterations(),
+                              sdreController.getLastResidual());
                 Serial.printf("   Total SDRE:          %4lu μs  (rodando a ~20 Hz em task separada)\n", sdre_t_total);
             }
             
